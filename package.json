@@ -1,0 +1,38 @@
+{
+  "name": "chatgpt-web-wrapper",
+  "version": "0.1.0",
+  "description": "A programmatic wrapper around the ChatGPT website using Playwright.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "chat": "tsx src/cli.ts",
+    "chrome:attach": "tsx src/chrome-attach.ts",
+    "bridge:server": "tsx src/bridge-server.ts",
+    "agent": "tsx src/site-agent.ts",
+    "agent:tui": "tsx src/agent-tui.ts"
+  },
+  "keywords": [
+    "chatgpt",
+    "playwright",
+    "wrapper",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/blessed": "^0.1.27",
+    "blessed": "^0.1.81",
+    "playwright": "^1.53.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}
