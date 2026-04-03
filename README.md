@@ -7,7 +7,7 @@ This project now supports two approaches:
 
 ## Important note
 
-If your goal is to build a production integration, the official API is still the stable option. If your goal is specifically "use the ChatGPT website as my brain," the extension bridge is the closer fit because it runs inside your real Chrome profile and real ChatGPT session.
+If your goal is to build a production integration, the official API is still the stable option. If your goal is specifically "use the ChatGPT website as my brain," the extension bridge is the closer fit because it runs inside your real Chrome profile and real ChatGPT session. This flow communicates through the extension bridge and local tools rather than automating the ChatGPT UI, so it is not running Playwright-style UI automation.
 
 ## Recommended path: extension bridge
 
