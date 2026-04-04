@@ -1,5 +1,7 @@
 export type SafetyMode = "auto" | "guarded" | "read_only";
 
+export type PlannerBackend = "chatgpt_web" | "ollama";
+
 export type TaskStatus =
   | "pending"
   | "running"
@@ -48,7 +50,10 @@ export type ToolName =
   | "git_show"
   | "remember_text"
   | "task_checkpoint_save"
-  | "task_checkpoint_load";
+  | "task_checkpoint_load"
+  | "memory_read"
+  | "memory_write"
+  | "memory_list";
 
 export interface ToolResult {
   ok: boolean;
@@ -78,7 +83,7 @@ export interface PlannerTurnResult {
 export interface PlannerAdapter {
   readonly name: string;
   getPlannerStatus(): Promise<PlannerStatus>;
-  startSession(): Promise<PlannerSession>;
+  startSession(skipReset?: boolean): Promise<PlannerSession>;
   resetSession(session: PlannerSession): Promise<void>;
   sendTurn(session: PlannerSession, prompt: string): Promise<PlannerTurnResult>;
 }
@@ -141,6 +146,7 @@ export interface TaskState {
   createdAt: string;
   updatedAt: string;
   plannerSessionId?: string;
+  conversationId?: string;
   steps: StepRecord[];
   changedFiles: string[];
   initialContext?: string;

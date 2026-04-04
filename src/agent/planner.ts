@@ -49,9 +49,11 @@ export class ChatGPTWebPlanner implements PlannerAdapter {
     }
   }
 
-  async startSession(): Promise<PlannerSession> {
+  async startSession(skipReset = false): Promise<PlannerSession> {
     const session = { id: randomUUID() };
-    await this.resetSession(session);
+    if (!skipReset) {
+      await this.resetSession(session);
+    }
     return session;
   }
 

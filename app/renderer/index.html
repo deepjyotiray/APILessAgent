@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Project picker overlay -->
+    <div id="projectPicker" class="project-picker">
+      <div class="picker-content">
+        <div class="drag-region" style="height:40px"></div>
+        <h1 class="picker-title">Agent</h1>
+        <p class="picker-subtitle">Open a project to get started</p>
+        <button class="primary-btn picker-open-btn" id="pickerOpenBtn">📂 Open Project…</button>
+        <div class="picker-recents" id="pickerRecents"></div>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <div class="drag-region"></div>
+        <h1 class="app-title">Agent</h1>
+        <div class="backend-badge" id="backendBadge" title="Click to switch backend">ChatGPT (Embedded)</div>
+        <div class="workspace-badge" id="workspaceBadge" title="Click to switch project">📁 No project</div>
+        <div class="workspace-badge" id="chatViewToggle" title="Toggle ChatGPT panel (Cmd+Shift+G)">👁 Show ChatGPT</div>
+        <div class="chatview-controls hidden" id="chatViewControls">
+          <button class="cv-btn" id="cvBack" title="Back">←</button>
+          <button class="cv-btn" id="cvForward" title="Forward">→</button>
+          <button class="cv-btn" id="cvRefresh" title="Refresh">↻</button>
+          <button class="cv-btn" id="cvHome" title="ChatGPT Home">⌂</button>
+        </div>
+        <div class="workspace-badge" id="loginBtn" title="Open login window">🔑 Login to ChatGPT</div>
+        <div class="workspace-badge" id="importCookiesBtn" title="Import session from Chrome">🍪 Import Chrome Session</div>
+      </div>
+      <nav class="sidebar-nav">
+        <button class="nav-btn active" data-panel="chat">💬 Chat</button>
+        <button class="nav-btn" data-panel="tasks">⚡ Tasks</button>
+        <button class="nav-btn" data-panel="memory">🧠 Memory</button>
+        <button class="nav-btn" data-panel="settings">⚙️ Settings</button>
+      </nav>
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span>Conversations</span>
+          <button class="icon-btn" id="newConvBtn" title="New conversation">+</button>
+        </div>
+        <div id="convList" class="item-list"></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="section-header"><span>Recent Tasks</span></div>
+        <div id="taskListSidebar" class="item-list"></div>
+      </div>
+      <div class="sidebar-footer">
+        <div id="statusIndicator" class="status-dot disconnected"></div>
+        <span id="statusText">Connecting…</span>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main id="mainContent">
+      <!-- Chat panel -->
+      <div class="panel active" id="panel-chat">
+        <div class="panel-header">
+          <h2 id="chatTitle">New Conversation</h2>
+          <div class="panel-actions">
+            <select id="safetyMode"><option value="auto">Auto</option><option value="guarded">Guarded</option><option value="read_only">Read Only</option></select>
+          </div>
+        </div>
+        <div id="chatMessages" class="messages-area"></div>
+        <div class="input-area">
+          <textarea id="chatInput" placeholder="Ask the agent anything… (Enter to send, Shift+Enter for newline)" rows="3"></textarea>
+          <button id="sendBtn" class="primary-btn">Send</button>
+        </div>
+      </div>
+
+      <!-- Tasks panel -->
+      <div class="panel" id="panel-tasks">
+        <div class="panel-header">
+          <h2>Tasks</h2>
+          <button class="primary-btn" id="newTaskBtn">New Task</button>
+        </div>
+        <div id="taskDetail" class="task-detail">
+          <p class="empty-state">Select a task or create a new one.</p>
+        </div>
+      </div>
+
+      <!-- Memory panel -->
+      <div class="panel" id="panel-memory">
+        <div class="panel-header">
+          <h2>Memory Bank</h2>
+          <button class="primary-btn" id="initMemoryBtn">Initialize Defaults</button>
+        </div>
+        <div id="memoryContent" class="memory-grid"></div>
+      </div>
+
+      <!-- Settings panel -->
+      <div class="panel" id="panel-settings">
+        <div class="panel-header"><h2>Settings</h2></div>
+        <div class="settings-form">
+          <div class="setting-group">
+            <label>Backend</label>
+            <div class="setting-row">
+              <button class="setting-btn" id="setElectron">ChatGPT (Embedded)</button>
+              <button class="setting-btn" id="setChatGPT">ChatGPT Web Bridge</button>
+              <button class="setting-btn" id="setOllama">Ollama (Local)</button>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label>Ollama Model</label>
+            <input type="text" id="ollamaModel" value="qwen2.5-coder:7b" placeholder="e.g. qwen2.5-coder:7b">
+          </div>
+          <div class="setting-group">
+            <label>Project Context</label>
+            <button class="setting-btn" id="initProjectCtx">Create AGENT.md</button>
+            <pre id="projectCtxPreview" class="code-preview"></pre>
+          </div>
+          <div class="setting-group">
+            <label>Status</label>
+            <pre id="healthOutput" class="code-preview"></pre>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Event log (collapsible bottom bar) -->
+    <div id="eventBar" class="event-bar collapsed">
+      <div class="event-bar-header" id="eventBarToggle">
+        <span>📡 Live Events</span>
+        <span id="eventCount">0</span>
+      </div>
+      <div id="eventLog" class="event-log"></div>
+    </div>
+  </div>
+
+  <!-- Modals -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-content">
+      <h3 id="modalTitle"></h3>
+      <div id="modalBody"></div>
+      <div class="modal-actions">
+        <button class="secondary-btn" id="modalCancel">Cancel</button>
+        <button class="primary-btn" id="modalConfirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

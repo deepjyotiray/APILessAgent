@@ -10,6 +10,7 @@ import type {
   ToolRegistry,
   ToolResult
 } from "./types.js";
+import { MemoryStore } from "./memory.js";
 
 const execAsync = promisify(exec);
 const OUTPUT_LIMIT = Number(process.env.AGENT_OUTPUT_LIMIT ?? "12000");
@@ -407,6 +408,47 @@ function createToolDefinitions(): ToolDefinition[] {
           status: task.status,
           changedFiles: task.changedFiles,
           stepCount: task.steps.length
+        });
+      }
+    },
+    {
+      name: "memory_read",
+      description: "Read a memory entry by key. Keys: project-summary, architecture, patterns, active-context, learnings, or custom.",
+      execute: async (args, context) => {
+        const key = asString(args.key);
+        if (!key) return err("invalid_args", "memory_read requires args.key.");
+        const store = new MemoryStore(context.root);
+        const content = await store.read(key);
+        if (content === null) return err("not_found", `Memory key "${key}" not found.`);
+        return ok("Memory read.", { key, content: limitOutput(content) });
+      }
+    },
+    {
+      name: "memory_write",
+      description: "Write or append to a memory entry. Use mode='append' to add, default overwrites.",
+      execute: async (args, context) => {
+        if (context.safetyMode === "read_only") return err("blocked_by_mode", "memory_write blocked in read_only.");
+        const key = asString(args.key);
+        const content = decodeStringArg(args, "content");
+        if (!key || content === undefined) return err("invalid_args", "memory_write requires key and content.");
+        const store = new MemoryStore(context.root);
+        const mode = asString(args.mode);
+        if (mode === "append") {
+          await store.append(key, content);
+        } else {
+          await store.write(key, content);
+        }
+        return ok("Memory written.", { key, mode: mode ?? "overwrite" });
+      }
+    },
+    {
+      name: "memory_list",
+      description: "List all memory entries with keys and last-updated timestamps.",
+      execute: async (_args, context) => {
+        const store = new MemoryStore(context.root);
+        const entries = await store.list();
+        return ok("Memory listed.", {
+          entries: entries.map((e) => ({ key: e.key, updatedAt: e.updatedAt, preview: e.content.slice(0, 100) }))
         });
       }
     }

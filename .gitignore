@@ -3,4 +3,7 @@ dist
 .auth
 .env
 .agent-state
+.agent-memory
+.agent-conversations
 .chatgpt-agent.local.json
+release/

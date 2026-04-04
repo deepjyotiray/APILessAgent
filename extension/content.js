@@ -105,6 +105,10 @@
       };
     }
 
+    if (payload.command === "getCookies") {
+      return { cookies: document.cookie };
+    }
+
     throw new Error(`Unknown command: ${payload.command}`);
   }
 
@@ -156,6 +160,16 @@
     }
 
     await waitForComposer(15000);
+
+    // Report updated URL back to bridge
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: "hello",
+        source: "chatgpt-content-script",
+        url: location.href,
+        title: document.title
+      }));
+    }
   }
 
   function waitForElement(selector, timeoutMs) {

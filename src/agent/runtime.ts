@@ -16,11 +16,16 @@ import type {
 } from "./types.js";
 import { TaskStateStore } from "./state.js";
 import { HookRunner } from "./hooks.js";
+import { MemoryStore } from "./memory.js";
+import { loadProjectContext } from "./project-context.js";
 
 const execAsync = promisify(exec);
 const DIFF_LIMIT = Number(process.env.AGENT_OUTPUT_LIMIT ?? "12000");
 
 export class AgentRuntime {
+  private projectContext = "";
+  private memoryContext = "";
+
   constructor(
     private readonly root: string,
     private readonly planner: PlannerAdapter,
@@ -41,6 +46,8 @@ export class AgentRuntime {
     const session = await this.planner.startSession();
     task.plannerSessionId = session.id;
     task.initialContext = await this.buildInitialContext(task, safetyMode);
+    const memory = new MemoryStore(this.root);
+    await memory.initDefaults();
     await this.store.save(task);
     await new HookRunner(this.root, this.config.hooks).onTaskStart(task);
     this.observer?.onTaskStarted?.(task);
@@ -50,6 +57,8 @@ export class AgentRuntime {
   async run(task: TaskState): Promise<TaskState> {
     task.status = "running";
     await this.store.save(task);
+    this.projectContext = await loadProjectContext(this.root);
+    this.memoryContext = await new MemoryStore(this.root).buildContextBlock();
     let session: PlannerSession = { id: task.plannerSessionId ?? "missing-session" };
     const hooks = new HookRunner(this.root, this.config.hooks);
 
@@ -198,6 +207,8 @@ export class AgentRuntime {
       "",
       `GOAL:\n${task.goal}`,
       `WORKSPACE ROOT:\n${task.root}`,
+      `PROJECT INSTRUCTIONS:\n${this.projectContext || "(none)"}`,
+      `MEMORY:\n${this.memoryContext || "(none)"}`,
       `INITIAL CONTEXT:\n${task.initialContext || "(none)"}`,
       `SAFETY MODE:\n${task.safetyMode}`,
       `SUMMARY:\n${task.summary || "(none yet)"}`,
