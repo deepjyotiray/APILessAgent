@@ -50,6 +50,10 @@ export class ChatGPTAgent {
 
     // Send to ChatGPT
     let chatResponse = await this.chatgpt.sendTurn(session, prompt);
+    if (chatResponse.ok && chatResponse.raw) {
+      console.log("[chatgpt]", chatResponse.raw.slice(0, 200));
+      this.emit({ type: "step", data: { step: chatResponse.raw.slice(0, 120) } });
+    }
     if (!chatResponse.ok || !chatResponse.raw) {
       // Retry with fresh session
       this.sessions.delete(conversationId);
@@ -65,6 +69,9 @@ export class ChatGPTAgent {
     for (let round = 0; round < MAX_ROUNDS; round++) {
       // Ask Ollama to extract actions from ChatGPT's response
       const actions = await this.extractActions(chatResponse.raw!, userMessage);
+      const actionSummary = actions.map((a: any) => a.action + (a.args?.path ? ":" + a.args.path : "")).join(", ");
+      console.log("[ollama] Extracted:", actionSummary || "(done)");
+      this.emit({ type: "step", data: { step: "Ollama: " + (actionSummary || "done") } });
 
       // If Ollama says "done" or found no actions, ChatGPT's response IS the answer
       if (!actions.length || (actions.length === 1 && actions[0].action === "done")) {
@@ -138,7 +145,12 @@ export class ChatGPTAgent {
         "\nNow continue with the task. If you need to write/update files, provide the complete file content. If you're done, give your final answer."
       ].join("\n");
 
+      this.emit({ type: "step", data: { step: "Sending results to ChatGPT..." } });
       chatResponse = await this.chatgpt.sendTurn(session, followUp);
+      if (chatResponse.ok && chatResponse.raw) {
+        console.log("[chatgpt] followup:", chatResponse.raw.slice(0, 200));
+        this.emit({ type: "step", data: { step: chatResponse.raw.slice(0, 120) } });
+      }
       if (!chatResponse.ok || !chatResponse.raw) {
         if (toolLog.length) return toolLog.join("\n\n") + "\n\n✅ Task completed.";
         return `⚠️ ${chatResponse.message}`;
@@ -153,18 +165,27 @@ export class ChatGPTAgent {
    * Ollama is great at this — it's a simple extraction task.
    */
   private async extractActions(chatgptResponse: string, originalTask: string): Promise<any[]> {
+    const fileTree = await this.getFileTree();
     const extractPrompt = [
       "Extract tool actions from the following AI response. Output a JSON array of actions.",
       "Each action: {\"action\":\"<tool>\",\"args\":{...},\"reason\":\"short reason\"}",
       "",
-      "Available tools: read_file, read_multiple_files, write_file, search, list_files, run_command, git_diff, git_status",
+      "Available tools:",
+      "- read_file: args {path: string} — read a file",
+      "- read_multiple_files: args {paths: string[]} — read several files",
+      "- write_file: args {path: string, content: string} — write full file content",
+      "- search: args {pattern: string} — search in workspace",
+      "- run_command: args {command: string} — run a shell command",
+      "",
+      `Workspace: ${this.root}`,
+      fileTree ? `Files in project:\n${fileTree}` : "",
       "",
       "Rules:",
-      "- If the response contains a complete file to write, extract it as write_file with the full content.",
-      "- If the response asks to read/inspect files, extract as read_file.",
-      "- If the response asks to run a command, extract as run_command.",
-      "- If the response is a final answer with no actions needed, return: [{\"action\":\"done\",\"result\":\"the answer\"}]",
-      "- If the response contains code blocks with file paths (like ```README.md), extract as write_file.",
+      "- ALWAYS include the path argument for read_file/write_file. Use paths relative to workspace root.",
+      "- If the AI mentions reading a file like README.md, extract: {\"action\":\"read_file\",\"args\":{\"path\":\"README.md\"}}",
+      "- If the AI provides complete file content in a code block, extract as write_file with the FULL content.",
+      "- If the AI response is a final answer with no file operations needed, return: [{\"action\":\"done\",\"result\":\"the answer\"}]",
+      "- If the AI mentions multiple files to read, use read_multiple_files with a paths array.",
       "- Output ONLY the JSON array. No other text.",
       "",
       `Original task: ${originalTask}`,
@@ -189,6 +210,7 @@ export class ChatGPTAgent {
       if (!res.ok) return [];
       const body = await res.json() as { message?: { content?: string } };
       const raw = body.message?.content?.trim() ?? "";
+      console.log("[ollama] Raw:", raw.slice(0, 300));
 
       // Parse the JSON array
       let text = raw;
