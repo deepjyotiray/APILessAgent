@@ -3,17 +3,15 @@ import { LocalToolRegistry } from "./tools.js";
 import { MemoryStore } from "./memory.js";
 import { loadProjectContext } from "./project-context.js";
 
-const MAX_ITERATIONS = 15;
-const MAX_CONTEXT_CHARS = 50000;
+const MAX_ITERATIONS = 6;
+const MAX_CONTEXT_CHARS = 40000;
 
 export interface AgentAction { action: string; [key: string]: unknown; }
 export interface AgentEvent { type: "init" | "thinking" | "tool_call" | "tool_result" | "answer" | "error" | "step"; data: unknown; }
 export type AgentEventCallback = (event: AgentEvent) => void;
 
 export class ChatGPTAgent {
-  // Map conversationId → ChatGPT session (one ChatGPT chat per app conversation)
   private sessions = new Map<string, PlannerSession>();
-  private protocolSent = new Set<string>();
 
   constructor(
     private readonly planner: PlannerAdapter,
@@ -25,226 +23,225 @@ export class ChatGPTAgent {
   setRoot(newRoot: string): void { this.root = newRoot; }
 
   resetSession(conversationId?: string): void {
-    if (conversationId) {
-      this.sessions.delete(conversationId);
-      this.protocolSent.delete(conversationId);
-    } else {
-      this.sessions.clear();
-      this.protocolSent.clear();
-    }
+    if (conversationId) this.sessions.delete(conversationId);
+    else this.sessions.clear();
   }
 
   async run(userMessage: string, conversationId: string = "default"): Promise<string> {
-    // Get or create a ChatGPT session for this conversation
     let session = this.sessions.get(conversationId);
-    let isFirstMessage = false;
+    const isFirst = !session;
 
     if (!session) {
       this.emit({ type: "init", data: "Starting new agent session…" });
       session = await this.planner.startSession();
       this.sessions.set(conversationId, session);
-      isFirstMessage = true;
     }
 
-    const toolList = this.tools.list().map(t => `- ${t.name}: ${t.description}`).join("\n");
-    const fileTree = await this.getFileTree();
-
-    // Protocol is always included but shorter on follow-up messages
-    const protocol = isFirstMessage ? [
-      "You are a coding agent. You MUST reply with ONLY a JSON object. No other text.",
-      "",
-      "JSON formats:",
-      '  Tool call: {"action":"<tool_name>","args":{...},"reason":"what you are doing and why"}',
-      '  Final answer: {"action":"done","result":"your complete answer in markdown"}',
-      "",
-      "Available tools:",
-      toolList,
-      "",
-      "RULES:",
-      "- Reply with ONE JSON object per message. Nothing else. No markdown fences.",
-      "- You HAVE access to all tools. Use them. Do NOT say you can't access files.",
-      "- Do NOT say tools are unavailable. They ARE available. I execute them for you.",
-      "- ALWAYS read_file before modifying. Then use write_file with contentBase64 (base64-encoded).",
-      "- Break complex tasks into steps: search → read → edit → verify.",
-      "- Use the reason field to explain your thinking.",
-      "- For done, put your FULL answer in result as markdown. Include diffs if you changed files.",
-      "- I will send tool results as: TOOL_RESULT: {json}",
-    ].join("\n") : [
-      "You are a coding agent. Reply with ONLY a JSON object. No other text.",
-      '  Tool call: {"action":"<tool_name>","args":{...},"reason":"why"}',
-      '  Done: {"action":"done","result":"your answer in markdown"}',
-      "",
-      "You HAVE access to these tools (I execute them for you):",
-      toolList,
-      "",
-      "Do NOT say tools are unavailable. Just use them.",
-    ].join("\n");
-
-    // Context — full on first message, minimal on follow-ups
-    let context: string;
-    if (isFirstMessage) {
-      const projectCtx = await loadProjectContext(this.root);
-      const memoryCtx = await new MemoryStore(this.root).buildContextBlock();
-      context = [
-        `WORKSPACE: ${this.root}`,
-        fileTree ? `\nFILES:\n${fileTree}` : "",
-        projectCtx ? `\n${projectCtx.slice(0, 2000)}` : "",
-        memoryCtx ? `\n${memoryCtx.slice(0, 2000)}` : "",
-      ].filter(Boolean).join("\n");
-    } else {
-      context = `WORKSPACE: ${this.root}`;
-    }
-
-    // Structure: context first, then task, then protocol LAST (LLMs attend most to the end)
-    let prompt = `${context}\n\nTASK: ${userMessage}\n\n${protocol}\n\nIMPORTANT: Your reply must be a single JSON object. Start your reply with { and end with }. No other text.`;
-    if (prompt.length > MAX_CONTEXT_CHARS) {
-      prompt = prompt.slice(0, MAX_CONTEXT_CHARS) + "\n...[truncated]";
-    }
-
+    // Build prompt
+    const prompt = await this.buildPrompt(userMessage, isFirst);
     this.emit({ type: "thinking", data: { message: userMessage } });
 
     let result = await this.planner.sendTurn(session, prompt);
     if (!result.ok || !result.raw) {
-      // Session might be dead — reset and retry with new session
+      // Retry with fresh session
       this.sessions.delete(conversationId);
       session = await this.planner.startSession();
       this.sessions.set(conversationId, session);
       result = await this.planner.sendTurn(session, prompt);
-      if (!result.ok || !result.raw) {
-        return `⚠️ ${result.message}`;
-      }
+      if (!result.ok || !result.raw) return `⚠️ ${result.message}`;
     }
 
-    // Agent tool loop
-    const toolLog: string[] = [];
-    let turnCount = 0;
-    let nudgeCount = 0;
+    let response = result.raw;
+    const actionLog: string[] = [];
 
-    for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const action = tryParseAction(result.raw!);
+    // Multi-turn loop: detect actions in response, execute, send back
+    for (let round = 0; round < MAX_ITERATIONS; round++) {
+      const actions = this.parseActions(response);
 
-      if (!action) {
-        // ChatGPT broke protocol — nudge once, then accept plain text
-        if (i < 2) {
-          const nudge = [
-            "WRONG. Reply with ONLY a JSON object.",
-            '{"action":"search","args":{"pattern":"coupon"},"reason":"finding files"}',
-            "or",
-            '{"action":"done","result":"Here is my answer..."}',
-            "",
-            `Retry: ${userMessage}`
-          ].join("\n");
-          turnCount++;
-          result = await this.planner.sendTurn(session, nudge);
-          if (!result.ok || !result.raw) break;
-          continue;
+      if (!actions.length) break; // Pure text answer, no actions needed
+
+      let needsFollowUp = false;
+      const followUpParts: string[] = [];
+
+      for (const action of actions) {
+        if (action.type === "read") {
+          this.emit({ type: "tool_call", data: { tool: "read_file", reason: `Reading ${action.path}` } });
+          const r = await this.execTool("read_file", { path: action.path });
+          if (r.ok) {
+            const content = (r.data as any)?.content ?? "";
+            followUpParts.push(`Contents of ${action.path}:\n\`\`\`\n${content.slice(0, 6000)}\n\`\`\``);
+            actionLog.push(`📖 Read \`${action.path}\``);
+          } else {
+            followUpParts.push(`Could not read ${action.path}: ${r.message}`);
+            actionLog.push(`❌ Failed to read \`${action.path}\``);
+          }
+          needsFollowUp = true;
+
+        } else if (action.type === "write" && action.path && action.content) {
+          this.emit({ type: "tool_call", data: { tool: "write_file", reason: `Writing ${action.path}` } });
+          const r = await this.execTool("write_file", { path: action.path, content: action.content });
+          if (r.ok) {
+            actionLog.push(`✅ Wrote \`${action.path}\``);
+            // Get diff
+            const diff = await this.execTool("git_diff", { path: action.path });
+            const diffText = (diff.data as any)?.stdout ?? "";
+            if (diffText.trim()) actionLog.push(`\`\`\`diff\n${diffText.slice(0, 3000)}\n\`\`\``);
+          } else {
+            actionLog.push(`❌ Failed to write \`${action.path}\`: ${r.message}`);
+          }
+
+        } else if (action.type === "run" && action.command) {
+          this.emit({ type: "tool_call", data: { tool: "run_command", reason: action.command } });
+          const r = await this.execTool("run_command", { command: action.command });
+          const output = ((r.data as any)?.stdout ?? "") + ((r.data as any)?.stderr ?? "");
+          actionLog.push(`🔧 \`${action.command}\`\n\`\`\`\n${output.trim().slice(0, 2000)}\n\`\`\``);
+          if (!r.ok) needsFollowUp = true;
+          followUpParts.push(`Command \`${action.command}\` output:\n\`\`\`\n${output.trim().slice(0, 3000)}\n\`\`\``);
+
+        } else if (action.type === "search" && action.query) {
+          this.emit({ type: "tool_call", data: { tool: "search", reason: action.query } });
+          const r = await this.execTool("search", { pattern: action.query });
+          const output = (r.data as any)?.stdout ?? "";
+          followUpParts.push(`Search results for "${action.query}":\n\`\`\`\n${output.slice(0, 3000)}\n\`\`\``);
+          actionLog.push(`🔍 Searched \`${action.query}\``);
+          needsFollowUp = true;
         }
-        return toolLog.length ? toolLog.join("\n\n") + "\n\n" + result.raw! : result.raw!;
       }
 
-      if (action.action === "done") {
-        const answer = (action.result as string) ?? (action.message as string) ?? "";
-        // Detect refusal — ChatGPT says it can't use tools
-        if (isRefusal(answer) && turnCount === 0) {
-          // Kill this session and retry with a completely fresh ChatGPT chat
-          this.sessions.delete(conversationId);
-          session = await this.planner.startSession();
-          this.sessions.set(conversationId, session);
-          this.emit({ type: "step", data: { step: "Retrying with fresh session..." } });
-          result = await this.planner.sendTurn(session, prompt);
-          if (!result.ok || !result.raw) return answer; // give up, return the refusal
-          turnCount++;
-          continue;
-        }
-        this.emit({ type: "answer", data: answer });
-        return toolLog.length ? toolLog.join("\n\n") + "\n\n" + answer : answer;
-      }
-
-      if (action.action === "error") {
-        return `⚠️ ${(action.message as string) ?? "Unknown error"}`;
-      }
-
-      if (action.action === "ready") {
-        result = await this.planner.sendTurn(session, `TASK: ${userMessage}\nReply with a JSON tool call.`);
-        if (!result.ok || !result.raw) return `⚠️ ${result.message}`;
+      // If ChatGPT needs more info, send it back in the same chat
+      if (needsFollowUp && followUpParts.length) {
+        const followUp = followUpParts.join("\n\n") + "\n\nNow continue with the task. If you need to write/update files, output the full file content in a code block with the file path as the language tag.";
+        result = await this.planner.sendTurn(session, followUp);
+        if (!result.ok || !result.raw) break;
+        response = result.raw;
         continue;
       }
 
-      // Tool call
-      const toolName = action.action;
-      const toolArgs = (action.args as Record<string, unknown>) ?? {};
-      const reason = (action.reason as string) ?? "";
+      break; // All actions were writes/runs, no follow-up needed
+    }
 
-      this.emit({ type: "step", data: { step: `💡 ${reason || `Using ${toolName}`}` } });
-      this.emit({ type: "tool_call", data: { tool: toolName, args: toolArgs, reason } });
+    // Combine action log + ChatGPT's response
+    if (actionLog.length) {
+      return actionLog.join("\n\n") + "\n\n" + response;
+    }
+    return response;
+  }
 
-      const toolDef = this.tools.get(toolName as any);
-      if (!toolDef) {
-        result = await this.planner.sendTurn(session,
-          `TOOL_RESULT: {"ok":false,"error":"Unknown tool: ${toolName}"}\nReply with a JSON object.`
-        );
-        if (!result.ok || !result.raw) return `⚠️ Loop failed: ${result.message}`;
-        continue;
-      }
+  private async buildPrompt(userMessage: string, isFirst: boolean): Promise<string> {
+    const parts: string[] = [];
 
-      const toolResult = await this.tools.execute(toolName as any, toolArgs, {
-        root: this.root, safetyMode: "auto", task: this.makeDummyTask(),
-        saveCheckpoint: async () => "", loadCheckpoint: async () => ({} as any)
-      });
+    if (isFirst) {
+      const projectCtx = await loadProjectContext(this.root);
+      const memoryCtx = await new MemoryStore(this.root).buildContextBlock();
+      const fileTree = await this.getFileTree();
 
-      this.emit({ type: "tool_result", data: { tool: toolName, ok: toolResult.ok, message: toolResult.message } });
+      parts.push("You are a coding assistant with full access to the user's project.");
+      parts.push("I will execute any file operations or commands for you.");
+      parts.push("");
+      parts.push("CONVENTIONS:");
+      parts.push("- When you need to see a file, say: \"Let me read path/to/file\" or \"I need to check path/to/file\"");
+      parts.push("- When you want to write/update a file, output the COMPLETE file in a code block with the path as the language tag:");
+      parts.push("  ```path/to/file.ts");
+      parts.push("  // full file content");
+      parts.push("  ```");
+      parts.push("- When you want to run a command, say: \"Let me run: `command here`\"");
+      parts.push("- When you want to search, say: \"Let me search for: pattern\"");
+      parts.push("- Be direct. Don't ask permission. Just do it.");
+      parts.push("");
+      parts.push(`WORKSPACE: ${this.root}`);
+      if (fileTree) parts.push(`\nFILE TREE:\n${fileTree}`);
+      if (projectCtx) parts.push(`\n${projectCtx.slice(0, 2000)}`);
+      if (memoryCtx) parts.push(`\n${memoryCtx.slice(0, 2000)}`);
+    }
 
-      // Build display log
-      let detail = `${toolResult.ok ? "✅" : "❌"} **${toolName}**${reason ? ` — ${reason}` : ""}: ${toolResult.message}`;
-
-      // Show diff for write operations
-      if (toolResult.ok && ["write_file", "apply_patch", "replace_text", "insert_text"].includes(toolName)) {
-        const filePath = (toolArgs.path as string) ?? (toolResult.data as any)?.path ?? "";
-        if (filePath) {
-          try {
-            const diffResult = await this.tools.execute("git_diff" as any, { path: filePath }, {
-              root: this.root, safetyMode: "auto", task: this.makeDummyTask(),
-              saveCheckpoint: async () => "", loadCheckpoint: async () => ({} as any)
-            });
-            const diff = (diffResult.data as any)?.stdout ?? "";
-            if (diff.trim()) detail += `\n\n\`\`\`diff\n${diff.slice(0, 3000)}\n\`\`\``;
-          } catch {}
+    // Pre-read files that seem relevant to the task
+    const relevantFiles = this.guessRelevantFiles(userMessage);
+    if (relevantFiles.length) {
+      this.emit({ type: "step", data: { step: `📖 Pre-reading: ${relevantFiles.join(", ")}` } });
+      for (const f of relevantFiles) {
+        const r = await this.execTool("read_file", { path: f });
+        if (r.ok) {
+          const content = (r.data as any)?.content ?? "";
+          parts.push(`\n--- ${f} ---\n${content.slice(0, 5000)}`);
         }
-      }
-
-      // Show output for commands
-      if (toolResult.ok && ["run_command", "run_tests", "run_build", "run_lint"].includes(toolName)) {
-        const output = ((toolResult.data as any)?.stdout ?? "") + ((toolResult.data as any)?.stderr ?? "");
-        if (output.trim()) detail += `\n\n\`\`\`\n${output.trim().slice(0, 2000)}\n\`\`\``;
-      }
-
-      toolLog.push(detail);
-
-      // Auto-complete after successful write with enough steps
-      if (toolResult.ok && ["write_file", "apply_patch", "replace_text", "insert_text"].includes(toolName) && turnCount >= 3) {
-        return toolLog.join("\n\n") + "\n\n✅ Changes applied successfully.";
-      }
-
-      // Feed result back
-      const feedback = `TOOL_RESULT: ${safeStringify({ ok: toolResult.ok, message: toolResult.message, data: toolResult.data }, 8000)}\n\nYour reply MUST be a single JSON object starting with { — either a tool call or {"action":"done","result":"..."}. No other text.`;
-
-      turnCount++;
-      result = await this.planner.sendTurn(session, feedback);
-      if (!result.ok || !result.raw) {
-        if (toolLog.length) return toolLog.join("\n\n") + "\n\n✅ Task completed.";
-        return `⚠️ Loop failed at step ${i + 1}: ${result.message}`;
       }
     }
 
-    return toolLog.join("\n\n") + "\n\n⚠️ Reached max iterations.";
+    parts.push(`\nUSER: ${userMessage}`);
+
+    let prompt = parts.join("\n");
+    if (prompt.length > MAX_CONTEXT_CHARS) {
+      prompt = prompt.slice(0, MAX_CONTEXT_CHARS) + "\n...[truncated]";
+    }
+    return prompt;
+  }
+
+  private guessRelevantFiles(message: string): string[] {
+    const lower = message.toLowerCase();
+    const files: string[] = [];
+    if (lower.includes("readme")) files.push("README.md");
+    if (lower.includes("package") || lower.includes("dependencies")) files.push("package.json");
+    if (lower.includes("config") || lower.includes("tsconfig")) files.push("tsconfig.json");
+    if (lower.includes("coupon")) files.push("public/coupons.json");
+    if (lower.includes("agent.md") || lower.includes("project context")) files.push("AGENT.md");
+    // Extract explicit file paths from the message
+    const pathMatches = message.match(/[\w./\-]+\.\w{1,10}/g) ?? [];
+    for (const p of pathMatches) {
+      if (!files.includes(p) && p.includes(".")) files.push(p);
+    }
+    return files.slice(0, 5);
+  }
+
+  private parseActions(text: string): Array<{type: string; path?: string; content?: string; command?: string; query?: string}> {
+    const actions: Array<{type: string; path?: string; content?: string; command?: string; query?: string}> = [];
+
+    // Detect file writes: ```path/to/file.ext\n...\n```
+    const writeRegex = /```([\w./\-]+\.\w{1,10})\n([\s\S]*?)```/g;
+    let m;
+    while ((m = writeRegex.exec(text)) !== null) {
+      const path = m[1];
+      const content = m[2];
+      // Skip common language tags that aren't file paths
+      if (["json", "bash", "sh", "diff", "text", "txt", "md", "markdown", "javascript", "typescript", "ts", "js", "html", "css", "python", "py", "yaml", "yml", "xml", "sql", "plaintext"].includes(path.toLowerCase())) continue;
+      if (content.trim().length > 0) {
+        actions.push({ type: "write", path, content });
+      }
+    }
+
+    // Detect file read requests: "let me read X", "I need to check X", "inspect X"
+    const readRegex = /(?:let me (?:read|check|inspect|look at|examine|open)|I need to (?:read|check|inspect|see|look at)|reading|checking)\s+[`"]?([\w./\-]+\.\w{1,10})[`"]?/gi;
+    while ((m = readRegex.exec(text)) !== null) {
+      actions.push({ type: "read", path: m[1] });
+    }
+
+    // Detect commands: "let me run: `cmd`" or "run `cmd`" or "execute `cmd`"
+    const cmdRegex = /(?:let me run|run|execute|running)[:\s]+`([^`]+)`/gi;
+    while ((m = cmdRegex.exec(text)) !== null) {
+      actions.push({ type: "run", command: m[1].trim() });
+    }
+
+    // Detect search: "let me search for: pattern" or "search for pattern"
+    const searchRegex = /(?:let me search|search|searching|grep)\s+(?:for[:\s]+)?[`"]?([^`"\n]+)[`"]?/gi;
+    while ((m = searchRegex.exec(text)) !== null) {
+      const query = m[1].trim();
+      if (query.length > 2 && query.length < 100) {
+        actions.push({ type: "search", query });
+      }
+    }
+
+    return actions;
+  }
+
+  private async execTool(name: string, args: Record<string, unknown>) {
+    return this.tools.execute(name as any, args, {
+      root: this.root, safetyMode: "auto", task: this.makeDummyTask(),
+      saveCheckpoint: async () => "", loadCheckpoint: async () => ({} as any)
+    });
   }
 
   private async getFileTree(): Promise<string> {
     try {
-      const r = await this.tools.execute("list_files", { path: ".", maxDepth: 2 }, {
-        root: this.root, safetyMode: "auto", task: this.makeDummyTask(),
-        saveCheckpoint: async () => "", loadCheckpoint: async () => ({} as any)
-      });
+      const r = await this.execTool("list_files", { path: ".", maxDepth: 2 });
       if (r.ok && r.data) return ((r.data as any).files as string[]).slice(0, 80).join("\n");
     } catch {}
     return "";
@@ -260,85 +257,4 @@ export class ChatGPTAgent {
   }
 
   private emit(event: AgentEvent): void { this.onEvent?.(event); }
-}
-
-function tryParseAction(raw: string): AgentAction | null {
-  let text = raw.trim();
-  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  if (fenced) text = fenced[1].trim();
-
-  let r = attemptParse(text);
-  if (r) return r;
-  r = attemptParse(fixBrokenJson(text));
-  if (r) return r;
-
-  const jsonMatch = text.match(/\{[\s\S]*"action"\s*:\s*"[^"]+[\s\S]*\}/);
-  if (jsonMatch) {
-    r = attemptParse(jsonMatch[0]) ?? attemptParse(fixBrokenJson(jsonMatch[0]));
-    if (r) return r;
-  }
-
-  const actionMatch = text.match(/"action"\s*:\s*"([^"]+)"/);
-  if (actionMatch) {
-    const action = actionMatch[1];
-    const reasonMatch = text.match(/"reason"\s*:\s*"([^"]*?)"/);
-    if (action === "done") {
-      const resultMatch = text.match(/"result"\s*:\s*"([\s\S]*?)"\s*\}\s*$/);
-      return { action: "done", result: resultMatch?.[1]?.replace(/\\n/g, "\n")?.replace(/\\"/g, '"') ?? text };
-    }
-    if (action === "ready" || action === "error") {
-      const msgMatch = text.match(/"message"\s*:\s*"([^"]*?)"/);
-      return { action, message: msgMatch?.[1] ?? "" };
-    }
-    const argsMatch = text.match(/"args"\s*:\s*(\{[\s\S]*?\})\s*[,}]/);
-    let args: Record<string, unknown> = {};
-    if (argsMatch) {
-      try { args = JSON.parse(fixBrokenJson(argsMatch[1])); } catch {
-        const pathMatch = argsMatch[1].match(/"path"\s*:\s*"([^"]+)"/);
-        const b64Match = argsMatch[1].match(/"(?:contentBase64|patchBase64)"\s*:\s*"([^"]+)"/);
-        if (pathMatch) args.path = pathMatch[1];
-        if (b64Match) args.contentBase64 = b64Match[1];
-      }
-    }
-    return { action, args, reason: reasonMatch?.[1] ?? "" };
-  }
-  return null;
-}
-
-function fixBrokenJson(text: string): string {
-  let result = "", inStr = false, i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    if (c === "\\" && inStr && i + 1 < text.length) { result += c + text[i + 1]; i += 2; continue; }
-    if (c === '"') { inStr = !inStr; result += c; i++; continue; }
-    if (inStr) {
-      if (c === "\n") { result += "\\n"; i++; continue; }
-      if (c === "\r") { i++; continue; }
-      if (c === "\t") { result += "\\t"; i++; continue; }
-    }
-    result += c; i++;
-  }
-  return result;
-}
-
-function attemptParse(text: string): AgentAction | null {
-  try { const p = JSON.parse(text); if (p && typeof p === "object" && typeof p.action === "string") return p as AgentAction; } catch {}
-  return null;
-}
-
-function isRefusal(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    (lower.includes("can't comply") || lower.includes("cannot comply")) ||
-    (lower.includes("can't follow") || lower.includes("cannot follow")) ||
-    (lower.includes("tools aren't") || lower.includes("tools are not")) ||
-    (lower.includes("not available in this") || lower.includes("not exposed")) ||
-    (lower.includes("don't have access to") && lower.includes("tool")) ||
-    (lower.includes("can't access") && lower.includes("workspace")) ||
-    (lower.includes("custom workspace tools") || lower.includes("those tools"))
-  );
-}
-
-function safeStringify(data: unknown, maxLen: number): string {
-  try { const s = JSON.stringify(data); return s.length > maxLen ? s.slice(0, maxLen) + "..." : s; } catch { return "{}"; }
 }
