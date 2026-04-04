@@ -95,7 +95,8 @@ export class ChatGPTAgent {
       context = `WORKSPACE: ${this.root}`;
     }
 
-    let prompt = `${protocol}\n\n${context}\n\nTASK: ${userMessage}`;
+    // Structure: context first, then task, then protocol LAST (LLMs attend most to the end)
+    let prompt = `${context}\n\nTASK: ${userMessage}\n\n${protocol}\n\nIMPORTANT: Your reply must be a single JSON object. Start your reply with { and end with }. No other text.`;
     if (prompt.length > MAX_CONTEXT_CHARS) {
       prompt = prompt.slice(0, MAX_CONTEXT_CHARS) + "\n...[truncated]";
     }
@@ -225,7 +226,7 @@ export class ChatGPTAgent {
       }
 
       // Feed result back
-      const feedback = `TOOL_RESULT: ${safeStringify({ ok: toolResult.ok, message: toolResult.message, data: toolResult.data }, 8000)}\n\nReply with your next JSON action or {"action":"done","result":"..."} if finished.`;
+      const feedback = `TOOL_RESULT: ${safeStringify({ ok: toolResult.ok, message: toolResult.message, data: toolResult.data }, 8000)}\n\nYour reply MUST be a single JSON object starting with { — either a tool call or {"action":"done","result":"..."}. No other text.`;
 
       turnCount++;
       result = await this.planner.sendTurn(session, feedback);

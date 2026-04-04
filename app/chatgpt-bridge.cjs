@@ -1,5 +1,4 @@
 // In-process bridge: controls the ChatGPT webview embedded in the Electron app.
-// No HTTP server, no WebSocket, no extension — just direct JS execution in the webview.
 
 let chatView = null;
 let ready = false;
@@ -50,7 +49,6 @@ async function newChat() {
     (async () => {
       const link = document.querySelector('a[href="/"], a[href="https://chatgpt.com/"]');
       if (link) { link.click(); } else { location.href = "https://chatgpt.com/"; }
-      // Wait for composer
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         if (document.querySelector('#prompt-textarea') ||
@@ -59,14 +57,19 @@ async function newChat() {
       }
     })()
   `);
-  await sleep(1000);
+  await sleep(1500);
   return { ok: true, url: chatView.webContents.getURL() };
 }
 
 async function sendMessage(prompt, timeoutMs = 120000) {
   await waitUntilReady();
 
-  // Type and send
+  // Step 1: Count existing messages BEFORE sending
+  const msgCountBefore = await chatView.webContents.executeJavaScript(`
+    document.querySelectorAll('[data-message-author-role="assistant"]').length
+  `);
+
+  // Step 2: Type and send
   await chatView.webContents.executeJavaScript(`
     (async () => {
       const prompt = ${JSON.stringify(prompt)};
@@ -83,34 +86,56 @@ async function sendMessage(prompt, timeoutMs = 120000) {
       if (composer instanceof HTMLTextAreaElement) {
         composer.value = prompt;
         composer.dispatchEvent(new Event("input", { bubbles: true }));
+        composer.dispatchEvent(new Event("change", { bubbles: true }));
       } else {
         composer.textContent = prompt;
         composer.dispatchEvent(new Event("input", { bubbles: true }));
       }
-      await new Promise(r => setTimeout(r, 150));
+      await new Promise(r => setTimeout(r, 200));
 
       const sendBtn = document.querySelector('button[data-testid="send-button"]');
-      if (sendBtn) { sendBtn.click(); }
-      else {
-        composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+      if (sendBtn && !sendBtn.disabled) {
+        sendBtn.click();
+      } else {
+        composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+        composer.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
       }
     })()
   `);
 
-  // Wait for response
+  // Step 3: Wait for a NEW assistant message (count must increase)
   const response = await chatView.webContents.executeJavaScript(`
     (async () => {
+      const countBefore = ${msgCountBefore};
       const timeoutMs = ${timeoutMs};
       const deadline = Date.now() + timeoutMs;
+
+      // First wait for generation to start (stop button appears) or new message
+      const startDeadline = Date.now() + 30000;
+      while (Date.now() < startDeadline) {
+        const stopBtn = document.querySelector('button[data-testid="stop-button"]');
+        const currentCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+        if (stopBtn || currentCount > countBefore) break;
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      // Now wait for generation to finish
       while (Date.now() < deadline) {
         const stopBtn = document.querySelector('button[data-testid="stop-button"]');
-        if (stopBtn) { await new Promise(r => setTimeout(r, 500)); continue; }
-        await new Promise(r => setTimeout(r, 2000));
-        const still = document.querySelector('button[data-testid="stop-button"]');
-        if (!still) {
-          const msgs = Array.from(document.querySelectorAll('[data-message-author-role]'));
-          const last = [...msgs].reverse().find(n => n.getAttribute('data-message-author-role') === 'assistant');
-          if (last) return (last.textContent || '').trim();
+        if (stopBtn) {
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
+        // No stop button — check if we have a new message
+        await new Promise(r => setTimeout(r, 1500));
+        const stillGenerating = document.querySelector('button[data-testid="stop-button"]');
+        if (!stillGenerating) {
+          const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+          if (assistantMsgs.length > countBefore) {
+            const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+            return (lastMsg.textContent || '').trim();
+          }
         }
       }
       throw new Error("Timed out waiting for ChatGPT response.");
