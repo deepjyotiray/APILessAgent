@@ -63,15 +63,21 @@ export class ChatGPTAgent {
       "RULES:",
       "- Reply with ONE JSON object per message. Nothing else. No markdown fences.",
       "- You HAVE access to all tools. Use them. Do NOT say you can't access files.",
+      "- Do NOT say tools are unavailable. They ARE available. I execute them for you.",
       "- ALWAYS read_file before modifying. Then use write_file with contentBase64 (base64-encoded).",
       "- Break complex tasks into steps: search → read → edit → verify.",
       "- Use the reason field to explain your thinking.",
       "- For done, put your FULL answer in result as markdown. Include diffs if you changed files.",
       "- I will send tool results as: TOOL_RESULT: {json}",
     ].join("\n") : [
-      "REMINDER: Reply with ONLY a JSON object. No other text.",
+      "You are a coding agent. Reply with ONLY a JSON object. No other text.",
       '  Tool call: {"action":"<tool_name>","args":{...},"reason":"why"}',
       '  Done: {"action":"done","result":"your answer in markdown"}',
+      "",
+      "You HAVE access to these tools (I execute them for you):",
+      toolList,
+      "",
+      "Do NOT say tools are unavailable. Just use them.",
     ].join("\n");
 
     // Context — full on first message, minimal on follow-ups
@@ -136,6 +142,18 @@ export class ChatGPTAgent {
 
       if (action.action === "done") {
         const answer = (action.result as string) ?? (action.message as string) ?? "";
+        // Detect refusal — ChatGPT says it can't use tools
+        if (isRefusal(answer) && turnCount === 0) {
+          // Kill this session and retry with a completely fresh ChatGPT chat
+          this.sessions.delete(conversationId);
+          session = await this.planner.startSession();
+          this.sessions.set(conversationId, session);
+          this.emit({ type: "step", data: { step: "Retrying with fresh session..." } });
+          result = await this.planner.sendTurn(session, prompt);
+          if (!result.ok || !result.raw) return answer; // give up, return the refusal
+          turnCount++;
+          continue;
+        }
         this.emit({ type: "answer", data: answer });
         return toolLog.length ? toolLog.join("\n\n") + "\n\n" + answer : answer;
       }
@@ -304,6 +322,19 @@ function fixBrokenJson(text: string): string {
 function attemptParse(text: string): AgentAction | null {
   try { const p = JSON.parse(text); if (p && typeof p === "object" && typeof p.action === "string") return p as AgentAction; } catch {}
   return null;
+}
+
+function isRefusal(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    (lower.includes("can't comply") || lower.includes("cannot comply")) ||
+    (lower.includes("can't follow") || lower.includes("cannot follow")) ||
+    (lower.includes("tools aren't") || lower.includes("tools are not")) ||
+    (lower.includes("not available in this") || lower.includes("not exposed")) ||
+    (lower.includes("don't have access to") && lower.includes("tool")) ||
+    (lower.includes("can't access") && lower.includes("workspace")) ||
+    (lower.includes("custom workspace tools") || lower.includes("those tools"))
+  );
 }
 
 function safeStringify(data: unknown, maxLen: number): string {
