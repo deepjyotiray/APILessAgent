@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
 const bridge = require("./chatgpt-bridge.cjs");
+const sessionPool = require("./session-pool.cjs");
 
 let mainWindow = null;
 let chatView = null;
@@ -417,6 +418,19 @@ const relayServer = relayHttp.createServer(async (req, res) => {
       const msgs = await bridge.readMessages();
       return relayJson(res, 200, { ok: true, messages: msgs });
     }
+    if (url.pathname === "/bridge/pool/status") {
+      return relayJson(res, 200, { ok: true, ...sessionPool.getPoolStatus() });
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/pool/send") {
+      const body = await relayReadBody(req);
+      const response = await sessionPool.sendMessage(body.role, body.prompt, body.timeoutMs ?? 120000);
+      return relayJson(res, 200, { ok: true, response });
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/pool/new-chat") {
+      const body = await relayReadBody(req);
+      await sessionPool.newChat(body.role);
+      return relayJson(res, 200, { ok: true });
+    }
     relayJson(res, 404, { ok: false, error: "Not found" });
   } catch (err) {
     relayJson(res, 500, { ok: false, error: err.message ?? String(err) });
@@ -450,6 +464,7 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (apiProcess) { try { apiProcess.kill(); } catch {} apiProcess = null; }
   try { relayServer.close(); } catch {}
+  sessionPool.destroyPool();
   if (process.platform !== "darwin") app.quit();
 });
 

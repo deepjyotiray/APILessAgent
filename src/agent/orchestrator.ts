@@ -5,6 +5,7 @@ import { LocalToolRegistry } from "./tools.js";
 import { MemoryStore } from "./memory.js";
 import { loadProjectContext } from "./project-context.js";
 import { SubAgentRunner } from "./sub-agents.js";
+import { fuzzyReplace } from "./fuzzy-match.js";
 import type { SubTask } from "./sub-agents.js";
 
 export interface AgentEvent {

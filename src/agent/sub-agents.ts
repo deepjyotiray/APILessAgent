@@ -1,4 +1,5 @@
 import type { PlannerAdapter, PlannerSession } from "./types.js";
+import { PoolPlanner } from "./pool-planner.js";
 import type { AgentEventCallback } from "./orchestrator.js";
 
 /**
