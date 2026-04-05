@@ -35,10 +35,17 @@ Rules:
 - Start with explore if you need to understand the code first
 - Use edit for modifying existing files (produces PATCH blocks)
 - Use write for creating new files (produces CREATE blocks)
-- Use review after edits to check for issues
+- Use review ONLY after edits/writes to check for issues. Do NOT use review for analysis-only tasks.
 - Use run for commands (tests, build, lint)
 - Keep it to 2-5 subtasks. Don't over-plan.
 - For simple tasks (single file edit), just output one edit subtask.
+- For analysis/explanation tasks, use only explore subtasks. No review needed.
+- For the LAST explore subtask, ask for a comprehensive summary that combines all findings.
+
+Example for "analyse the repo":
+SUBTASK: explore | files: README.md, package.json, AGENT.md | understand purpose, setup, and high-level architecture
+SUBTASK: explore | files: src/agent/orchestrator.ts, src/agent/tools.ts, src/agent/types.ts | trace core agent workflow and tool system
+SUBTASK: explore | files: app/main.cjs, src/api-server.ts, src/bridge-server.ts | inspect platform surfaces and integration points
 
 Example for "add error handling to the API":
 SUBTASK: explore | files: src/api-server.ts | understand current error handling
@@ -46,15 +53,18 @@ SUBTASK: edit | files: src/api-server.ts | add try-catch and error responses
 SUBTASK: run | files: | npm run build
 SUBTASK: review | files: | check the diff for issues`;
 
-const EXPLORER_PROMPT = `You are a code explorer. Analyze the provided files and produce a concise summary.
+const EXPLORER_PROMPT = `You are a code explorer. Analyze the provided files and produce a detailed summary.
 
-Output:
-- What the code does (1-2 sentences)
+Output a thorough analysis covering:
+- What the code does (clear explanation)
 - Key functions/classes and their purpose
-- Relevant patterns or conventions
-- Anything important for the task at hand
+- How components connect to each other
+- Relevant patterns, conventions, or design decisions
+- Data flow and control flow
+- Dependencies and external integrations
+- Anything notable, unusual, or important
 
-Be concise. No code output. Just analysis.`;
+Be thorough but organized. Use markdown headers and bullet points.`;
 
 const EDITOR_PROMPT = `You are a code editor. Given file contents and a task, produce surgical edits.
 

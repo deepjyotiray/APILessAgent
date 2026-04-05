@@ -70,8 +70,8 @@ export class ChatGPTAgent {
         case "explore": {
           const fileContents = await this.readFiles(subtask.files, log);
           const result = await this.agents.explore(subtask.description, fileContents);
-          explorerSummary = result.output;
-          log.push(`🔍 Explorer: ${result.output.slice(0, 200)}`);
+          explorerSummary += "\n\n" + result.output;
+          log.push(`🔍 **Explorer:**\n${result.output}`);
           break;
         }
 
@@ -98,8 +98,7 @@ export class ChatGPTAgent {
             testOutput = ((testResult.data as any)?.stdout ?? "") + ((testResult.data as any)?.stderr ?? "");
           }
           const result = await this.agents.review(diff, testOutput);
-          log.push(`🔎 Review: ${result.success ? "PASS ✅" : "ISSUES FOUND ❌"}`);
-          log.push(result.output.slice(0, 500));
+          log.push(`🔎 **Review:** ${result.success ? "PASS ✅" : "ISSUES FOUND ❌"}\n${result.output}`);
 
           // If review found issues and produced patches, execute them
           if (!result.success) {
