@@ -104,10 +104,19 @@ Output:
 Be concise. Focus on bugs, logic errors, and missing edge cases.`;
 
 export class SubAgentRunner {
+  // Persistent session per role — each role reuses its own ChatGPT chat
+  private sessions = new Map<string, PlannerSession>();
+
   constructor(
     private readonly chatgpt: PlannerAdapter,
     private readonly emit?: AgentEventCallback
   ) {}
+
+  /** Reset a specific role session or all */
+  resetSession(role?: string): void {
+    if (role) this.sessions.delete(role);
+    else this.sessions.clear();
+  }
 
   /**
    * Plan: break a task into subtasks.
@@ -116,7 +125,7 @@ export class SubAgentRunner {
     this.emit?.({ type: "step", data: { step: "📋 Planning subtasks…" } });
 
     const prompt = `${PLANNER_PROMPT}\n\nFILE TREE:\n${fileTree}\n\nTASK: ${task}`;
-    const response = await this.callFresh(prompt);
+    const response = await this.callRole("planner", prompt);
 
     if (!response) {
       return { complexity: "simple", subtasks: [{ description: task, files: [], role: "edit" }], summary: "Single step" };
@@ -139,7 +148,7 @@ export class SubAgentRunner {
     this.emit?.({ type: "step", data: { step: "🔍 Exploring codebase…" } });
 
     const prompt = `${EXPLORER_PROMPT}\n\n${fileContents}\n\nTASK: ${task}`;
-    const output = await this.callFresh(prompt);
+    const output = await this.callRole("explorer", prompt);
 
     return { role: "explorer", output: output ?? "No analysis produced.", success: !!output };
   }
@@ -154,7 +163,7 @@ export class SubAgentRunner {
     if (explorerSummary) parts.push("", "ANALYSIS:", explorerSummary);
     parts.push("", `TASK: ${task}`);
 
-    const output = await this.callFresh(parts.join("\n"));
+    const output = await this.callRole("editor", parts.join("\n"));
     return { role: "editor", output: output ?? "No edits produced.", success: !!output };
   }
 
@@ -168,7 +177,7 @@ export class SubAgentRunner {
     if (explorerSummary) parts.push("", "ANALYSIS:", explorerSummary);
     parts.push("", `TASK: ${task}`);
 
-    const output = await this.callFresh(parts.join("\n"));
+    const output = await this.callRole("writer", parts.join("\n"));
     return { role: "writer", output: output ?? "No content produced.", success: !!output };
   }
 
@@ -181,26 +190,46 @@ export class SubAgentRunner {
     const parts = [REVIEWER_PROMPT, "", "DIFF:", diff];
     if (testOutput) parts.push("", "TEST OUTPUT:", testOutput);
 
-    const output = await this.callFresh(parts.join("\n"));
+    const output = await this.callRole("reviewer", parts.join("\n"));
     const passed = output?.toUpperCase().includes("PASS") ?? false;
     return { role: "reviewer", output: output ?? "No review produced.", success: passed };
   }
 
   /**
-   * Each sub-agent call gets a FRESH ChatGPT chat.
+   * Call a sub-agent by role. Reuses the same ChatGPT chat per role.
+   * First call for a role opens a new chat. Subsequent calls continue in it.
    */
-  private async callFresh(prompt: string): Promise<string | null> {
+  private async callRole(role: string, prompt: string): Promise<string | null> {
     try {
-      const session = await this.chatgpt.startSession();
+      let session = this.sessions.get(role);
+      if (!session) {
+        session = await this.chatgpt.startSession();
+        this.sessions.set(role, session);
+        console.log(`[${role}] New chat session`);
+      } else {
+        console.log(`[${role}] Reusing existing chat`);
+      }
+
       const result = await this.chatgpt.sendTurn(session, prompt.slice(0, 35000));
       if (result.ok && result.raw) {
-        console.log(`[sub-agent] Response (${result.raw.length} chars):`, result.raw.slice(0, 100));
+        console.log(`[${role}] Response (${result.raw.length} chars):`, result.raw.slice(0, 100));
         return result.raw;
       }
-      console.log("[sub-agent] Failed:", result.message);
+
+      // Session might be dead — reset and retry
+      console.log(`[${role}] Failed, retrying with fresh session:`, result.message);
+      session = await this.chatgpt.startSession();
+      this.sessions.set(role, session);
+      const retry = await this.chatgpt.sendTurn(session, prompt.slice(0, 35000));
+      if (retry.ok && retry.raw) {
+        console.log(`[${role}] Retry succeeded (${retry.raw.length} chars)`);
+        return retry.raw;
+      }
+
+      console.log(`[${role}] Retry also failed:`, retry.message);
       return null;
     } catch (err: any) {
-      console.log("[sub-agent] Error:", err.message);
+      console.log(`[${role}] Error:`, err.message);
       return null;
     }
   }

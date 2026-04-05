@@ -29,6 +29,8 @@ export class ChatGPTAgent {
   setRoot(r: string): void { this.root = r; }
   resetSession(id?: string): void {
     if (id) this.sessions.delete(id); else this.sessions.clear();
+    // Also reset sub-agent sessions so they start fresh
+    this.agents.resetSession();
   }
 
   async run(userMessage: string, conversationId = "default"): Promise<string> {
