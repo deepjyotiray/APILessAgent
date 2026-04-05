@@ -59,6 +59,7 @@ export class ChatGPTAgent {
 
     // Step 3: Execute each subtask
     let explorerSummary = "";
+    const explorerOutputs: string[] = [];
 
     for (let i = 0; i < plan.subtasks.length; i++) {
       const subtask = plan.subtasks[i];
