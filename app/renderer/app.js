@@ -11,6 +11,17 @@
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
 
+  // Strip leading line numbers from code block text
+  function stripLineNums(text) {
+    const lines = text.split('\n');
+    const nonEmpty = lines.filter(l => l.trim());
+    if (nonEmpty.length < 2) return text;
+    const nums = nonEmpty.map(l => { const m = l.match(/^(\d+)/); return m ? parseInt(m[1]) : null; });
+    if (nums.some(n => n === null)) return text;
+    for (let i = 1; i < nums.length; i++) { if (nums[i] < nums[i-1]) return text; }
+    return lines.map(l => !l.trim() ? '' : l.replace(/^\d+\s?[|:]?\s?/, '')).join('\n');
+  }
+
   const chatMessages = $("#chatMessages");
   const chatInput = $("#chatInput");
   const sendBtn = $("#sendBtn");
@@ -391,9 +402,9 @@
     const escaped = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const formatted = escaped
       // Code blocks with language + copy button
-      .replace(/```diff\n([\s\S]*?)```/g, '<pre class="code-block diff-block"><button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);this.textContent=\'✓\';setTimeout(()=>this.textContent=\'Copy\',1500)">Copy</button><code>$1</code></pre>')
-      .replace(/```(\w+)\n([\s\S]*?)```/g, '<pre class="code-block"><div class="code-lang">$1<button class="copy-btn" onclick="navigator.clipboard.writeText(this.closest(\'pre\').querySelector(\'code\').textContent);this.textContent=\'✓\';setTimeout(()=>this.textContent=\'Copy\',1500)">Copy</button></div><code>$2</code></pre>')
-      .replace(/```\n([\s\S]*?)```/g, '<pre class="code-block"><button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);this.textContent=\'✓\';setTimeout(()=>this.textContent=\'Copy\',1500)">Copy</button><code>$1</code></pre>')
+      .replace(/```diff\n([\s\S]*?)```/g, (_, code) => `<pre class="code-block diff-block"><button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);this.textContent='✓';setTimeout(()=>this.textContent='Copy',1500)">Copy</button><code>${stripLineNums(code)}</code></pre>`)
+      .replace(/```(\w+)\n([\s\S]*?)```/g, (_, lang, code) => `<pre class="code-block"><div class="code-lang">${lang}<button class="copy-btn" onclick="navigator.clipboard.writeText(this.closest('pre').querySelector('code').textContent);this.textContent='✓';setTimeout(()=>this.textContent='Copy',1500)">Copy</button></div><code>${stripLineNums(code)}</code></pre>`)
+      .replace(/```\n([\s\S]*?)```/g, (_, code) => `<pre class="code-block"><button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);this.textContent='✓';setTimeout(()=>this.textContent='Copy',1500)">Copy</button><code>${stripLineNums(code)}</code></pre>`)
       // Tables: header | row | separator
       .replace(/^(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/gm, (_, hdr, _sep, body) => {
         const th = hdr.split('|').filter(c => c.trim()).map(c => `<th>${c.trim()}</th>`).join('');
