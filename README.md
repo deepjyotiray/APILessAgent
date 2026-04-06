@@ -124,6 +124,7 @@ npm run app:pack
 | **Memory Store** | `src/agent/memory.ts` (`MemoryStore`) | Long-term memory for agent decisions, patterns learned, and project-specific notes. |
 | **Hooks** | `src/agent/hooks.ts` (`HookRunner`) | Lifecycle callbacks: `onTaskStart`, `onTaskComplete`, `beforeTool`, `afterTool` for extensibility. |
 | **Sub-Agents** | `src/agent/sub-agents.ts` (`SubAgentRunner`) | Specialized agents for different phases: planning, code exploration, editing, writing, and review. |
+| **Conversation Summarizer** | `src/agent/conversation-summarizer.ts` | Intelligent cross-turn memory: summarizes conversation history via Ollama when token pressure builds, injects running summary into prompts. |
 | **Ranking Feedback** | `src/agent/ranking-feedback.ts` | Tracks which files were useful in past interactions to boost their relevance in future context selections. |
 | **Configuration** | `src/agent/config.ts` | Loads environment-based settings for context limits, timeouts, model selection, and behavior/types.ts` → `AgentConfig`. |
 | **Project Context** | `src/agent/project-context.ts` | Loads an optional `AGENT.md` at the repo root and injects its contents into every prompt. |
@@ -230,7 +231,7 @@ npm run app:dev
 
 ### Prerequisites
 
-- **Ollama** (recommended) — for embeddings (`nomic-embed-text`), intent classification (`qwen2.5-coder:32b`), and knowledge base generation (`qwen2.5-coder:7b`). Install from [ollama.com](https://ollama.com). Models are auto-pulled on first use.
+- **Ollama** (recommended) — for embeddings (`nomic-embed-text`), conversation summarization, and knowledge base generation (`qwen2.5-coder:7b`). Install from [ollama.com](https://ollama.com). Models are auto-pulled on first use.
 - **Node.js 18+**
 - **Electron** (bundled via devDependencies)
 
@@ -255,8 +256,8 @@ npm run app:pack    # .dmg installer
 |---|---|---|
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `EMBED_MODEL` | `nomic-embed-text` | Model for vector embeddings |
-| `CLASSIFY_MODEL` | `qwen2.5-coder:32b` | Model for intent classification |
-| `EDITOR_MODEL` | `qwen2.5-coder:32b` | Model for fallback file editing |
+| `CLASSIFY_MODEL` | `qwen2.5-coder:7b` | Model for intent classification |
+| `EDITOR_MODEL` | `qwen2.5-coder:7b` | Model for fallback file editing |
 | `KB_MODEL` | `qwen2.5-coder:7b` | Model for knowledge base generation |
 | `AGENT_MAX_STEPS` | `24` | Max steps in runtime task loop |
 | `AGENT_OUTPUT_LIMIT` | `12000` | Max chars for diff/output in prompts |

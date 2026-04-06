@@ -5,6 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { PlannerAdapter, PlannerSession, PlannerStatus, PlannerTurnResult } from "./types.js";
+import { compactOllamaHistory } from "./conversation-summarizer.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
 const DEFAULT_MODEL = "qwen2.5-coder:7b";
@@ -23,6 +24,8 @@ export class OllamaPlanner implements PlannerAdapter {
 
   getModel(): string { return this.model; }
   setModel(model: string): void { this.model = model; }
+  getHistory(): Array<{ role: string; content: string }> { return this.conversationHistory; }
+  setHistory(h: Array<{ role: string; content: string }>): void { this.conversationHistory = h; }
 
   private log(msg: string): void {
     this.onLog?.(msg);
@@ -170,6 +173,17 @@ export class OllamaPlanner implements PlannerAdapter {
       }
 
       this.conversationHistory.push({ role: "assistant", content: raw });
+
+      // Compact history if it's getting large (>20 messages)
+      if (this.conversationHistory.length > 20) {
+        const totalChars = this.conversationHistory.reduce((s, m) => s + m.content.length, 0);
+        if (totalChars > 30000) {
+          this.log(`Compacting history (${this.conversationHistory.length} msgs, ${totalChars} chars)`);
+          this.conversationHistory = compactOllamaHistory(this.conversationHistory, "", 6);
+          this.log(`After compaction: ${this.conversationHistory.length} msgs`);
+        }
+      }
+
       return { ok: true, raw, message: "Turn succeeded." };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

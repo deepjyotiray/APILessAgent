@@ -9,6 +9,13 @@ import type { SubTask } from "./sub-agents.js";
 import { needsKnowledgeBase, buildKnowledgeBase, enrichFromChatGPT, loadKnowledgeBase } from "./knowledge-base.js";
 import type { Conversation, ConversationStore } from "./conversation.js";
 import { extractNeedFiles, needFileToToolCall, normalizePlannerResponse } from "./chat-llm.js";
+import {
+  type ConversationSummaryState,
+  createSummaryState,
+  addTurn,
+  summarize,
+  getSummaryForPrompt,
+} from "./conversation-summarizer.js";
 
 export interface AgentEvent {
   type: "init" | "thinking" | "tool_call" | "tool_result" | "answer" | "error" | "step";
@@ -45,6 +52,7 @@ Rules:
 
 export class ChatGPTAgent {
   private sessions = new Map<string, PlannerSession>();
+  private summaryStates = new Map<string, ConversationSummaryState>();
   private pipeline: ContextPipeline;
   private taskStart = 0;
   private sysInfoCache = "";
@@ -86,7 +94,14 @@ export class ChatGPTAgent {
   }
 
   resetSession(id?: string): void {
-    if (id) this.sessions.delete(id); else this.sessions.clear();
+    if (id) { this.sessions.delete(id); this.summaryStates.delete(id); }
+    else { this.sessions.clear(); this.summaryStates.clear(); }
+  }
+
+  private getSummaryState(conversationId: string): ConversationSummaryState {
+    let s = this.summaryStates.get(conversationId);
+    if (!s) { s = createSummaryState(); this.summaryStates.set(conversationId, s); }
+    return s;
   }
 
   private buildSystemPrompt(): string {
@@ -159,13 +174,19 @@ export class ChatGPTAgent {
 
     // Build prompt — lean when 0 relevant files, rich when there are
     const session = await this.getSession(conversationId);
+    const summaryState = this.getSummaryState(conversationId);
     const sysInfo = await this.getSystemInfo();
+    const conversationSummary = getSummaryForPrompt(summaryState);
     const promptParts: string[] = [
       this.buildSystemPrompt(),
       "",
       `System: ${sysInfo}`,
       `Working directory: ${this.root}`,
     ];
+
+    if (conversationSummary) {
+      promptParts.push("", "CONVERSATION HISTORY:", conversationSummary);
+    }
 
     if (fastContext && fastContext.files.length > 0) {
       const repoMap = await this.pipeline.getRepoMap();
@@ -177,6 +198,9 @@ export class ChatGPTAgent {
 
     promptParts.push("", `USER: ${userMessage}`);
     const initialPrompt = promptParts.filter(Boolean).join("\n");
+
+    // Record user turn
+    addTurn(summaryState, { role: "user", content: userMessage });
 
     // === Single unified tool-call loop ===
     const taskId = randomUUID();
@@ -276,6 +300,19 @@ export class ChatGPTAgent {
     if (output.length === 0) {
       output.push(raw.trim() || "Task completed.");
     }
+
+    // Record assistant output and trigger summarization if needed
+    const finalAnswer = output.join("\n\n");
+    const hadEdits = output.some(l => l.startsWith("✅"));
+    addTurn(summaryState, { role: "assistant", content: finalAnswer, hadEdit: hadEdits });
+    // Record tool turns
+    for (const line of output) {
+      if (line.startsWith("✅") || line.startsWith("⚠️")) {
+        addTurn(summaryState, { role: "tool", content: line, hadEdit: line.startsWith("✅") });
+      }
+    }
+    // Summarize if token pressure built up
+    await summarize(summaryState).catch(() => {});
 
     if (conv && cs) {
       const edits = output.filter(l => l.startsWith("✅")).length;
