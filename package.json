@@ -7,12 +7,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "dev": "tsx src/cli.ts",
-    "chat": "tsx src/cli.ts",
-    "chrome:attach": "tsx src/chrome-attach.ts",
-    "bridge:server": "tsx src/bridge-server.ts",
-    "agent": "tsx src/site-agent.ts",
-    "agent:tui": "tsx src/agent-tui.ts",
     "api:server": "tsx src/api-server.ts",
     "app": "electron app/main.cjs",
     "app:dev": "concurrently \"npm run api:server\" \"electron app/main.cjs\"",

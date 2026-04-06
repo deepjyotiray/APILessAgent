@@ -6,11 +6,13 @@ const CONVERSATIONS_DIR = ".agent-conversations";
 
 export interface ConversationMessage {
   id: string;
-  role: "user" | "assistant" | "system" | "tool";
+  role: "user" | "assistant" | "system" | "tool" | "task";
   content: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
   toolResult?: { ok: boolean; message: string };
+  taskId?: string;
+  taskStatus?: "started" | "step" | "tool_call" | "tool_result" | "completed" | "failed";
   timestamp: string;
 }
 
@@ -19,6 +21,7 @@ export interface Conversation {
   title: string;
   workspaceRoot: string;
   plannerBackend: string;
+  activeTaskId?: string;
   createdAt: string;
   updatedAt: string;
   messages: ConversationMessage[];
@@ -59,8 +62,15 @@ export class ConversationStore {
   }
 
   async load(id: string): Promise<Conversation> {
-    const raw = await fs.readFile(this.filePath(id), "utf8");
-    return JSON.parse(raw) as Conversation;
+    try {
+      const raw = await fs.readFile(this.filePath(id), "utf8");
+      return JSON.parse(raw) as Conversation;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Conversation ${id} not found`);
+      }
+      throw err;
+    }
   }
 
   async list(): Promise<Array<Pick<Conversation, "id" | "title" | "plannerBackend" | "createdAt" | "updatedAt"> & { messageCount: number }>> {
@@ -102,6 +112,26 @@ export class ConversationStore {
     return full;
   }
 
+  addTaskStep(conv: Conversation, taskId: string, status: ConversationMessage["taskStatus"], content: string, extra?: Partial<Pick<ConversationMessage, "toolName" | "toolArgs" | "toolResult">>): ConversationMessage {
+    return this.addMessage(conv, {
+      role: "task",
+      content,
+      taskId,
+      taskStatus: status,
+      ...extra,
+    });
+  }
+
+  startTask(conv: Conversation, taskId: string, goal: string): void {
+    conv.activeTaskId = taskId;
+    this.addTaskStep(conv, taskId, "started", goal);
+  }
+
+  finishTask(conv: Conversation, taskId: string, status: "completed" | "failed", summary: string): void {
+    conv.activeTaskId = undefined;
+    this.addTaskStep(conv, taskId, status, summary);
+  }
+
   getRecentMessages(conv: Conversation, count: number): ConversationMessage[] {
     return conv.messages.slice(-count);
   }
@@ -112,9 +142,14 @@ export class ConversationStore {
     let chars = 0;
     for (let i = msgs.length - 1; i >= 0 && chars < maxChars; i--) {
       const m = msgs[i];
-      const line = m.role === "tool"
-        ? `[tool:${m.toolName}] ${m.toolResult?.ok ? "ok" : "failed"}: ${m.content.slice(0, 200)}`
-        : `[${m.role}] ${m.content}`;
+      let line: string;
+      if (m.role === "tool") {
+        line = `[tool:${m.toolName}] ${m.toolResult?.ok ? "ok" : "failed"}: ${m.content.slice(0, 200)}`;
+      } else if (m.role === "task") {
+        line = `[task:${m.taskStatus}${m.toolName ? `:${m.toolName}` : ""}] ${m.content.slice(0, 300)}`;
+      } else {
+        line = `[${m.role}] ${m.content}`;
+      }
       chars += line.length;
       lines.unshift(line);
     }

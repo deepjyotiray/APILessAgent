@@ -18,6 +18,12 @@ import { TaskStateStore } from "./state.js";
 import { HookRunner } from "./hooks.js";
 import { MemoryStore } from "./memory.js";
 import { loadProjectContext } from "./project-context.js";
+import { ContextPipeline } from "./context-pipeline.js";
+import {
+  compactSteps,
+  getCompactContinuationMessage,
+} from "./compact.js";
+import { compressSummaryText } from "./summary-compression.js";
 
 const execAsync = promisify(exec);
 const DIFF_LIMIT = Number(process.env.AGENT_OUTPUT_LIMIT ?? "12000");
@@ -25,6 +31,7 @@ const DIFF_LIMIT = Number(process.env.AGENT_OUTPUT_LIMIT ?? "12000");
 export class AgentRuntime {
   private projectContext = "";
   private memoryContext = "";
+  private pipeline: ContextPipeline;
 
   constructor(
     private readonly root: string,
@@ -34,7 +41,14 @@ export class AgentRuntime {
     private readonly config: AgentConfig,
     private readonly observer?: RuntimeObserver,
     private readonly maxSteps = Number(process.env.AGENT_MAX_STEPS ?? "24")
-  ) {}
+  ) {
+    this.pipeline = new ContextPipeline(tools, root, {
+      maxTotalChars: Math.floor(config.compaction.maxPromptChars * 0.6),
+      maxFileChars: 15000,
+      maxFiles: 15,
+      reserveForOutput: 20000,
+    });
+  }
 
   async createTask(goal: string, safetyMode: SafetyMode): Promise<TaskState> {
     const status = await this.planner.getPlannerStatus();
@@ -186,13 +200,30 @@ export class AgentRuntime {
       toolResult: step.toolResult
     })).join("\n");
 
-    return [
+    // Token budgeting: calculate available space for context
+    const maxChars = this.config.compaction.maxPromptChars;
+    const fixedParts = [
       "You are a coding agent planner using structured local tools.",
-      "Reply with exactly one JSON object and nothing else.",
-      "Allowed response forms:",
-      '{"type":"tool","tool":"<tool_name>","args":{},"reason":"short reason"}',
-      '{"type":"done","message":"summary","summary":"optional concise recap"}',
-      '{"type":"error","message":"reason","retryable":false}',
+      "",
+      "OUTPUT FORMAT (MANDATORY):",
+      "You MUST reply with ONLY a single JSON object. No markdown, no explanation, no preamble, no commentary.",
+      "Do NOT wrap the JSON in ```json``` code fences.",
+      "Do NOT write anything before or after the JSON object.",
+      "Your entire response must be parseable by JSON.parse().",
+      "",
+      "RESPONSE SCHEMA — use exactly one of these three forms:",
+      '1. Tool call:  {"type":"tool","tool":"<tool_name>","args":{...},"reason":"short reason"}',
+      '2. Task done:  {"type":"done","message":"summary","summary":"optional concise recap"}',
+      '3. Error:      {"type":"error","message":"reason","retryable":false}',
+      "",
+      "EXAMPLE of a CORRECT response (your entire output should look exactly like this):",
+      '{"type":"tool","tool":"read_file","args":{"path":"src/index.ts"},"reason":"Need to understand entry point"}',
+      "",
+      "EXAMPLE of WRONG responses (NEVER do these):",
+      '- "Sure, let me read the file: {\"type\":\"tool\"...}"  ← has text before JSON',
+      '- "```json\n{...}\n```"  ← has code fences',
+      '- "I\'ll help you with that. Here\'s my plan..."  ← no JSON at all',
+      "",
       "Rules:",
       "- Never claim the workspace is inaccessible.",
       "- Use one tool per reply.",
@@ -202,20 +233,36 @@ export class AgentRuntime {
       "- When using apply_patch, prefer patchBase64 instead of patch.",
       "- After edits, usually run git_diff and a verification command before done.",
       "- Use only the tools listed below.",
+      "- UNCERTAINTY RULE: If you are unsure about the codebase structure, file locations, or how something works, DO NOT guess. Use search or read_file to gather more context before proceeding.",
+      "- EXPLORATION RULE: Before editing any file, you should have read it first (or it should appear in INITIAL CONTEXT). Never edit blind.",
       "TOOLS:",
       toolDescriptions,
       "",
       `GOAL:\n${task.goal}`,
       `WORKSPACE ROOT:\n${task.root}`,
-      `PROJECT INSTRUCTIONS:\n${this.projectContext || "(none)"}`,
-      `MEMORY:\n${this.memoryContext || "(none)"}`,
-      `INITIAL CONTEXT:\n${task.initialContext || "(none)"}`,
       `SAFETY MODE:\n${task.safetyMode}`,
-      `SUMMARY:\n${task.summary || "(none yet)"}`,
       `CHANGED FILES:\n${task.changedFiles.join(", ") || "(none)"}`,
       `VERIFICATION:\n${JSON.stringify(task.verification, null, 2)}`,
-      `CURRENT DIFF:\n${task.currentDiff || "(none)"}`,
-      `RECENT STEPS:\n${recentSteps || "(none yet)"}`
+    ].join("\n");
+
+    const fixedLen = fixedLen_calc(fixedParts);
+    const remaining = maxChars - fixedLen;
+
+    // Allocate remaining budget proportionally
+    const contextBudget = Math.floor(remaining * 0.45);
+    const memoryBudget = Math.floor(remaining * 0.15);
+    const diffBudget = Math.floor(remaining * 0.15);
+    const stepsBudget = Math.floor(remaining * 0.20);
+    const summaryBudget = Math.floor(remaining * 0.05);
+
+    return [
+      fixedParts,
+      `PROJECT INSTRUCTIONS:\n${truncateToBudget(this.projectContext || "(none)", memoryBudget)}`,
+      `MEMORY:\n${truncateToBudget(this.memoryContext || "(none)", memoryBudget)}`,
+      `INITIAL CONTEXT:\n${truncateToBudget(task.initialContext || "(none)", contextBudget)}`,
+      `SUMMARY:\n${truncateToBudget(task.summary || "(none yet)", summaryBudget)}`,
+      `CURRENT DIFF:\n${truncateToBudget(task.currentDiff || "(none)", diffBudget)}`,
+      `RECENT STEPS:\n${truncateToBudget(recentSteps || "(none yet)", stepsBudget)}`
     ].join("\n");
   }
 
@@ -243,10 +290,14 @@ export class AgentRuntime {
     const repair = await this.planner.sendTurn(
       session,
       [
-        "Your last reply did not follow the required JSON tool protocol.",
-        "Return exactly one JSON object and nothing else.",
-        `LAST REPLY:\n${first.raw}`
-      ].join("\n\n")
+        "PROTOCOL VIOLATION: Your last reply was not valid JSON.",
+        "You MUST respond with ONLY a raw JSON object. No text before or after it.",
+        "Do NOT use markdown code fences. Do NOT add any explanation.",
+        "Your ENTIRE response must be exactly one JSON object like:",
+        '{"type":"tool","tool":"list_files","args":{"path":"."},"reason":"explore workspace"}',
+        "",
+        `YOUR INVALID REPLY WAS:\n${first.raw.slice(0, 500)}`
+      ].join("\n")
     );
 
     if (!repair.ok || !repair.raw) {
@@ -268,10 +319,12 @@ export class AgentRuntime {
     const retry = await this.planner.sendTurn(
       session,
       [
-        prompt,
+        "FINAL ATTEMPT. You have failed twice to return valid JSON.",
+        "Respond with ONLY this JSON and absolutely nothing else:",
+        '{"type":"tool","tool":"list_files","args":{"path":".","maxDepth":2},"reason":"Starting by exploring the workspace"}',
         "",
-        "PLANNER FAILURE:",
-        "Your prior two replies were invalid. Re-read the tool protocol and return exactly one valid JSON object."
+        "Copy the above JSON exactly, or replace it with your own valid tool call JSON.",
+        "DO NOT add any other text."
       ].join("\n")
     );
 
@@ -341,39 +394,40 @@ export class AgentRuntime {
   }
 
   private hasMeaningfulProgress(task: TaskState): boolean {
-    return task.steps.some((step) =>
+    const hasSuccessfulTool = task.steps.some((step) =>
       step.toolName !== undefined &&
       step.toolResult?.ok === true &&
       !["task_checkpoint_save", "task_checkpoint_load"].includes(step.toolName)
     );
+    // Require at least one file read or search before allowing completion
+    const hasReadContext = task.steps.some((step) =>
+      step.toolResult?.ok === true &&
+      ["read_file", "read_file_range", "read_multiple_files", "search", "list_files"].includes(step.toolName ?? "")
+    );
+    return hasSuccessfulTool && hasReadContext;
   }
 
   private compactTaskState(task: TaskState): void {
     const keepRecentSteps = Math.max(1, this.config.compaction.keepRecentSteps);
-    if (task.steps.length <= keepRecentSteps) {
-      return;
-    }
+    if (task.steps.length <= keepRecentSteps) return;
 
     const candidatePrompt = this.buildPrompt(task);
-    if (candidatePrompt.length <= this.config.compaction.maxPromptChars) {
-      return;
-    }
+    if (candidatePrompt.length <= this.config.compaction.maxPromptChars) return;
 
-    const olderSteps = task.steps.slice(0, -keepRecentSteps);
-    const summaryLines = olderSteps.map((step) => {
-      const tool = step.toolName ? `tool=${step.toolName}` : "tool=(none)";
-      const result = step.toolResult ? `ok=${step.toolResult.ok}${step.toolResult.errorCode ? ` error=${step.toolResult.errorCode}` : ""}` : "ok=(none)";
-      return `step ${step.index}: ${tool}; ${result}`;
-    });
+    // Use Claude Code-style compaction
+    const result = compactSteps(task.steps, {
+      preserveRecentSteps: keepRecentSteps,
+      maxEstimatedTokens: Math.floor(this.config.compaction.maxPromptChars / 4),
+    }, task.summary);
 
-    task.summary = limitOutput(
-      [
-        task.summary,
-        "Compacted prior steps:",
-        ...summaryLines
-      ].filter(Boolean).join("\n")
-    );
-    task.steps = task.steps.slice(-keepRecentSteps);
+    if (result.removedStepCount === 0) return;
+
+    // Compress the summary to fit budget
+    const compressed = compressSummaryText(result.summary);
+    task.summary = compressed
+      ? getCompactContinuationMessage(compressed, true, result.compactedSteps.length > 0)
+      : result.formattedSummary;
+    task.steps = result.compactedSteps;
   }
 
   private async captureDiff(task: TaskState): Promise<void> {
@@ -399,6 +453,9 @@ export class AgentRuntime {
   }
 
   private async buildInitialContext(task: TaskState, safetyMode: SafetyMode): Promise<string> {
+    // Use context pipeline to gather goal-relevant files
+    const contextResult = await this.pipeline.gatherContext(task.goal);
+
     const listFiles = await this.tools.execute("list_files", { path: ".", maxDepth: 2 }, {
       root: this.root,
       safetyMode,
@@ -415,22 +472,43 @@ export class AgentRuntime {
       loadCheckpoint: (name: string) => this.store.loadCheckpoint(task.id, name)
     });
 
-    return limitOutput(
-      [
-        "Workspace file summary:",
-        JSON.stringify(listFiles, null, 2),
-        "",
-        "Git status:",
-        JSON.stringify(gitStatus, null, 2)
-      ].join("\n")
-    );
+    const parts = [
+      "Workspace file summary:",
+      JSON.stringify(listFiles, null, 2),
+      "",
+      "Git status:",
+      JSON.stringify(gitStatus, null, 2),
+    ];
+
+    // Add goal-relevant context from pipeline (embedding-ranked with usages)
+    if (contextResult.files.length > 0) {
+      parts.push("", "GOAL-RELEVANT CODE (embedding-ranked with usages):");
+      parts.push(this.pipeline.formatForPrompt(contextResult));
+      parts.push(`\nContext stats: ${contextResult.files.length} files, ${contextResult.totalChars} chars, ${contextResult.semanticChunks?.length ?? 0} semantic chunks, keywords: [${contextResult.keywords.join(", ")}]`);
+    }
+
+    return limitOutput(parts.join("\n"));
   }
 }
 
 function parsePlannerReply(raw: string): PlannerReply | null {
-  const trimmed = stripCodeFence(raw);
+  // Try multiple extraction strategies in order of preference
+  const candidates = [
+    stripCodeFence(raw),           // Direct or code-fenced JSON
+    extractJsonFromProse(raw),     // JSON embedded in surrounding text
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const result = tryParseReply(candidate);
+    if (result) return result;
+  }
+  return null;
+}
+
+function tryParseReply(text: string): PlannerReply | null {
   try {
-    const parsed = JSON.parse(trimmed) as Partial<PlannerReply>;
+    const parsed = JSON.parse(text) as Partial<PlannerReply>;
     if (parsed.type === "tool" && typeof parsed.tool === "string") {
       return {
         type: "tool",
@@ -455,6 +533,39 @@ function parsePlannerReply(raw: string): PlannerReply | null {
     }
   } catch {
     return null;
+  }
+  return null;
+}
+
+/** Extract a JSON object from prose text — finds the first { ... } that parses */
+function extractJsonFromProse(raw: string): string | null {
+  // Find all potential JSON object boundaries
+  const firstBrace = raw.indexOf("{");
+  if (firstBrace === -1) return null;
+
+  // Try from each { to find a valid JSON object
+  for (let start = firstBrace; start < raw.length; start++) {
+    if (raw[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\" && inString) { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          const candidate = raw.slice(start, i + 1);
+          // Quick sanity check: must contain "type"
+          if (candidate.includes('"type"')) return candidate;
+          break;
+        }
+      }
+    }
   }
   return null;
 }
@@ -500,4 +611,14 @@ function limitOutput(text: string): string {
     return text;
   }
   return `${text.slice(0, DIFF_LIMIT)}\n...[truncated]`;
+}
+
+function truncateToBudget(text: string, budget: number): string {
+  if (budget <= 0) return "(omitted — budget exceeded)";
+  if (text.length <= budget) return text;
+  return `${text.slice(0, budget)}\n...[truncated to fit budget]`;
+}
+
+function fixedLen_calc(text: string): number {
+  return text.length;
 }

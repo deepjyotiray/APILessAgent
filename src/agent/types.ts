@@ -1,6 +1,6 @@
 export type SafetyMode = "auto" | "guarded" | "read_only";
 
-export type PlannerBackend = "chatgpt_web" | "ollama";
+export type PlannerBackend = "chatgpt_web" | "ollama" | "merlin";
 
 export type TaskStatus =
   | "pending"
@@ -53,7 +53,8 @@ export type ToolName =
   | "task_checkpoint_load"
   | "memory_read"
   | "memory_write"
-  | "memory_list";
+  | "memory_list"
+  | "delete_file";
 
 export interface ToolResult {
   ok: boolean;

@@ -3,16 +3,20 @@ const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
 const bridge = require("./chatgpt-bridge.cjs");
+const merlinBridge = require("./merlin-bridge.cjs");
 const sessionPool = require("./session-pool.cjs");
 
 let mainWindow = null;
 let chatView = null;
+let merlinView = null;
 let apiProcess = null;
 let currentWorkspace = null;
 let chatViewVisible = false;
+let merlinViewVisible = false;
 const API_PORT = process.env.APP_PORT ?? "3850";
 const RECENTS_FILE = path.join(app.getPath("userData"), "recent-projects.json");
 const CHATGPT_PARTITION = "persist:chatgpt";
+const MERLIN_PARTITION = "persist:merlin";
 
 // --- Recent projects ---
 function loadRecents() {
@@ -61,6 +65,59 @@ function launchApiServer(workspace) {
   apiProcess.stderr?.on("data", d => process.stderr.write(`[api:err] ${d}`));
   apiProcess.on("exit", code => { if (code) console.error(`API server exited with ${code}`); });
   console.log(`[app] Started API server for: ${workspace}`);
+}
+
+// --- Merlin BrowserView ---
+function createMerlinView() {
+  const ses = session.fromPartition(MERLIN_PARTITION);
+  ses.setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    details.requestHeaders["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    callback({ requestHeaders: details.requestHeaders });
+  });
+
+  merlinView = new BrowserView({
+    webPreferences: {
+      partition: MERLIN_PARTITION,
+      contextIsolation: false,
+      nodeIntegration: false,
+      sandbox: false,
+      javascript: true,
+      webgl: true
+    }
+  });
+  merlinBridge.setBrowserView(merlinView);
+  merlinView.webContents.loadURL("https://www.getmerlin.in/chat");
+
+  merlinView.webContents.setWindowOpenHandler(({ url }) => {
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        width: 600, height: 750,
+        webPreferences: { partition: MERLIN_PARTITION, contextIsolation: false, sandbox: false }
+      }
+    };
+  });
+
+  merlinView.webContents.on("did-finish-load", () => {
+    console.log("[merlin] Loaded:", merlinView.webContents.getURL().slice(0, 100));
+  });
+  merlinView.webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
+    console.log("[merlin] Failed:", errorCode, errorDescription, validatedURL?.slice(0, 80));
+  });
+}
+
+function layoutMerlinView() {
+  if (!mainWindow || !merlinView) return;
+  const bounds = mainWindow.getContentBounds();
+  if (merlinViewVisible) {
+    const chatWidth = Math.floor(bounds.width * 0.4);
+    mainWindow.addBrowserView(merlinView);
+    merlinView.setBounds({ x: bounds.width - chatWidth, y: 0, width: chatWidth, height: bounds.height });
+    merlinView.setAutoResize({ width: false, height: true });
+  } else {
+    mainWindow.removeBrowserView(merlinView);
+  }
 }
 
 // --- ChatGPT BrowserView ---
@@ -144,10 +201,11 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.on("closed", () => { mainWindow = null; });
-  mainWindow.on("resize", () => layoutChatView());
+  mainWindow.on("resize", () => { layoutChatView(); layoutMerlinView(); });
 
-  // Create the ChatGPT view (hidden)
+  // Create the ChatGPT and Merlin views (hidden)
   createChatView();
+  createMerlinView();
 }
 
 // --- Menu ---
@@ -172,6 +230,7 @@ function buildMenu() {
         { label: "Open Project…", accelerator: "Cmd+O", click: () => pickAndOpenWorkspace() },
         { type: "separator" },
         { label: "Toggle ChatGPT Panel", accelerator: "Cmd+Shift+G", click: () => toggleChatView() },
+        { label: "Toggle Merlin Panel", accelerator: "Cmd+Shift+M", click: () => toggleMerlinView() },
         { type: "separator" },
         { role: "close" }
       ]
@@ -185,8 +244,16 @@ function buildMenu() {
 
 function toggleChatView() {
   chatViewVisible = !chatViewVisible;
+  if (chatViewVisible && merlinViewVisible) { merlinViewVisible = false; layoutMerlinView(); mainWindow?.webContents.send("merlinview-toggled", false); }
   layoutChatView();
   mainWindow?.webContents.send("chatview-toggled", chatViewVisible);
+}
+
+function toggleMerlinView() {
+  merlinViewVisible = !merlinViewVisible;
+  if (merlinViewVisible && chatViewVisible) { chatViewVisible = false; layoutChatView(); mainWindow?.webContents.send("chatview-toggled", false); }
+  layoutMerlinView();
+  mainWindow?.webContents.send("merlinview-toggled", merlinViewVisible);
 }
 
 // --- Workspace ---
@@ -223,6 +290,80 @@ ipcMain.handle("pick-folder", async () => {
 ipcMain.handle("open-workspace", (_, dir) => { openWorkspace(dir); return true; });
 ipcMain.handle("toggle-chatview", () => { toggleChatView(); return chatViewVisible; });
 ipcMain.handle("get-chatview-visible", () => chatViewVisible);
+ipcMain.handle("toggle-merlinview", () => { toggleMerlinView(); return merlinViewVisible; });
+ipcMain.handle("get-merlinview-visible", () => merlinViewVisible);
+ipcMain.handle("merlinview-back", () => { if (merlinView && !merlinView.webContents.isDestroyed()) merlinView.webContents.navigationHistory.goBack(); });
+ipcMain.handle("merlinview-forward", () => { if (merlinView && !merlinView.webContents.isDestroyed()) merlinView.webContents.navigationHistory.goForward(); });
+ipcMain.handle("merlinview-refresh", () => { if (merlinView && !merlinView.webContents.isDestroyed()) merlinView.webContents.reload(); });
+ipcMain.handle("merlinview-home", () => { if (merlinView && !merlinView.webContents.isDestroyed()) merlinView.webContents.loadURL("https://www.getmerlin.in/chat"); });
+ipcMain.handle("merlinview-inspect-dom", async () => {
+  if (!merlinView || merlinView.webContents.isDestroyed()) return { ok: false };
+  try {
+    const result = await merlinView.webContents.executeJavaScript(`
+      (function() {
+        const info = { composer: null, sendBtn: null, messages: [], articles: [], newChatBtn: null, stopBtn: null, sidebarLinks: [], allBtnSummary: [] };
+        // Find composer
+        const ta = document.querySelector('textarea');
+        const pm = document.querySelector('.ProseMirror');
+        const ce = document.querySelector('[contenteditable="true"]');
+        const tb = document.querySelector('[role="textbox"]');
+        const el = pm || ta || ce || tb;
+        if (el) info.composer = { tag: el.tagName, id: el.id, classes: el.className?.slice(0,150), contentEditable: el.contentEditable, placeholder: el.getAttribute('placeholder') || el.getAttribute('data-placeholder'), parent: el.parentElement?.className?.slice(0,150), grandparent: el.parentElement?.parentElement?.className?.slice(0,150) };
+        // Find send button
+        const allBtns = [...document.querySelectorAll('button')];
+        for (const b of allBtns) {
+          const aria = b.getAttribute('aria-label') || '';
+          const text = b.textContent?.trim() || '';
+          if (/send/i.test(aria) || /send/i.test(text) || b.type === 'submit') {
+            info.sendBtn = { tag: 'button', classes: b.className?.slice(0,150), aria, text: text.slice(0,30), type: b.type, disabled: b.disabled, parent: b.parentElement?.className?.slice(0,150) };
+            break;
+          }
+        }
+        // Articles (Merlin message containers)
+        const articles = document.querySelectorAll('article');
+        articles.forEach((a, i) => {
+          const firstChild = a.children[0];
+          const secondChild = a.children[1];
+          info.articles.push({
+            index: i,
+            classes: a.className?.slice(0,120),
+            childCount: a.children.length,
+            text: (a.textContent || '').trim().slice(0,120),
+            firstChildTag: firstChild?.tagName,
+            firstChildClasses: firstChild?.className?.slice(0,100),
+            secondChildTag: secondChild?.tagName,
+            secondChildClasses: secondChild?.className?.slice(0,100),
+            hasMarkdown: !!a.querySelector('.markdown, .prose, [class*="markdown"], [class*="prose"]'),
+            proseEl: a.querySelector('.prose, [class*="prose"]')?.className?.slice(0,100),
+          });
+        });
+        // Sidebar links for new chat
+        const links = document.querySelectorAll('a[href]');
+        links.forEach(l => {
+          const href = l.getAttribute('href') || '';
+          const text = l.textContent?.trim() || '';
+          if (/chat|new/i.test(href) || /new/i.test(text)) {
+            info.sidebarLinks.push({ href, text: text.slice(0,40), classes: l.className?.slice(0,80) });
+          }
+        });
+        // All buttons summary (first 20)
+        allBtns.slice(0, 25).forEach(b => {
+          info.allBtnSummary.push({ text: (b.textContent?.trim() || '').slice(0,30), aria: b.getAttribute('aria-label')?.slice(0,30), type: b.type, classes: b.className?.slice(0,60) });
+        });
+        // Stop/generating indicators
+        const loadingEls = document.querySelectorAll('[class*="loading"], [class*="typing"], [class*="generating"], [class*="streaming"], [class*="animate-pulse"], [class*="animate-spin"]');
+        if (loadingEls.length > 0) {
+          info.stopBtn = { found: true, count: loadingEls.length, first: loadingEls[0].className?.slice(0,100) };
+        }
+        return info;
+      })()
+    `);
+    console.log('[merlin-dom]', JSON.stringify(result, null, 2));
+    return { ok: true, dom: result };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 ipcMain.handle("chatview-back", () => { if (chatView && !chatView.webContents.isDestroyed()) chatView.webContents.navigationHistory.goBack(); });
 ipcMain.handle("chatview-forward", () => { if (chatView && !chatView.webContents.isDestroyed()) chatView.webContents.navigationHistory.goForward(); });
 ipcMain.handle("chatview-refresh", () => { if (chatView && !chatView.webContents.isDestroyed()) chatView.webContents.reload(); });
@@ -233,6 +374,12 @@ ipcMain.handle("bridge:status", () => bridge.getStatus());
 ipcMain.handle("bridge:new-chat", () => bridge.newChat());
 ipcMain.handle("bridge:send", (_, prompt, timeoutMs) => bridge.sendMessage(prompt, timeoutMs));
 ipcMain.handle("bridge:messages", () => bridge.readMessages());
+
+// --- IPC: Merlin bridge ---
+ipcMain.handle("bridge:merlin:status", () => merlinBridge.getStatus());
+ipcMain.handle("bridge:merlin:new-chat", () => merlinBridge.newChat());
+ipcMain.handle("bridge:merlin:send", (_, prompt, timeoutMs) => merlinBridge.sendMessage(prompt, timeoutMs));
+ipcMain.handle("bridge:merlin:messages", () => merlinBridge.readMessages());
 
 // --- IPC: ChatGPT login ---
 
@@ -294,6 +441,51 @@ ipcMain.handle("login-chatgpt", async () => {
       }
       setTimeout(async () => {
         const status = await bridge.getStatus();
+        resolve(status);
+      }, 3000);
+    });
+  });
+});
+
+// --- IPC: Merlin login ---
+ipcMain.handle("login-merlin", async () => {
+  const loginWin = new BrowserWindow({
+    width: 1000, height: 750,
+    title: "Log in to Merlin — close this window when done",
+    webPreferences: {
+      partition: MERLIN_PARTITION,
+      contextIsolation: false,
+      sandbox: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false
+    }
+  });
+  loginWin.webContents.setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+  loginWin.webContents.setWindowOpenHandler(({ url }) => {
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        width: 600, height: 700,
+        webPreferences: { partition: MERLIN_PARTITION, contextIsolation: false, sandbox: false }
+      }
+    };
+  });
+  loginWin.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => { callback(true); });
+  loginWin.webContents.on("did-navigate", (e, url) => console.log("[merlin-login] Navigated:", url.slice(0, 100)));
+  loginWin.webContents.on("did-fail-load", (e, code, desc, url) => {
+    console.log("[merlin-login] Failed:", code, desc, url?.slice(0, 80));
+    if (code === -3 && url) loginWin.webContents.loadURL(url);
+  });
+  loginWin.loadURL("https://www.getmerlin.in/chat");
+
+  return new Promise((resolve) => {
+    loginWin.on("closed", () => {
+      console.log("[app] Merlin login window closed, reloading webview");
+      if (merlinView && !merlinView.webContents.isDestroyed()) {
+        merlinView.webContents.loadURL("https://www.getmerlin.in/chat");
+      }
+      setTimeout(async () => {
+        const status = await merlinBridge.getStatus();
         resolve(status);
       }, 3000);
     });
@@ -416,6 +608,24 @@ const relayServer = relayHttp.createServer(async (req, res) => {
     }
     if (url.pathname === "/bridge/messages") {
       const msgs = await bridge.readMessages();
+      return relayJson(res, 200, { ok: true, messages: msgs });
+    }
+    // --- Merlin bridge relay ---
+    if (url.pathname === "/bridge/merlin/status") {
+      const status = await merlinBridge.getStatus();
+      return relayJson(res, 200, status);
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/merlin/new-chat") {
+      const result = await merlinBridge.newChat();
+      return relayJson(res, 200, { ok: true, ...result });
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/merlin/send") {
+      const body = await relayReadBody(req);
+      const response = await merlinBridge.sendMessage(body.prompt, body.timeoutMs ?? 120000);
+      return relayJson(res, 200, { ok: true, response });
+    }
+    if (url.pathname === "/bridge/merlin/messages") {
+      const msgs = await merlinBridge.readMessages();
       return relayJson(res, 200, { ok: true, messages: msgs });
     }
     if (url.pathname === "/bridge/pool/status") {

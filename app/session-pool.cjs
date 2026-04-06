@@ -136,27 +136,47 @@ async function sendMessage(role, prompt, timeoutMs = 120000) {
     document.querySelectorAll('[data-message-author-role="assistant"]').length
   `);
 
-  // Type and send
+  // Type and send — use execCommand for proper React/ProseMirror state sync
   await view.webContents.executeJavaScript(`
     (async () => {
       const prompt = ${JSON.stringify(prompt)};
-      const selectors = ['#prompt-textarea', 'textarea[placeholder]', '[contenteditable="true"][role="textbox"]'];
+      const selectors = ['#prompt-textarea', '[contenteditable="true"][role="textbox"]', 'textarea[placeholder]'];
       let composer = null;
       for (const s of selectors) { composer = document.querySelector(s); if (composer) break; }
       if (!composer) throw new Error("Composer not found");
       composer.focus();
       if (composer instanceof HTMLTextAreaElement) {
-        composer.value = prompt;
-        composer.dispatchEvent(new Event("input", { bubbles: true }));
-        composer.dispatchEvent(new Event("change", { bubbles: true }));
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        nativeSetter.call(composer, prompt);
+        composer.dispatchEvent(new Event('input', { bubbles: true }));
+        composer.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
-        composer.textContent = prompt;
-        composer.dispatchEvent(new Event("input", { bubbles: true }));
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+        await new Promise(r => setTimeout(r, 100));
+        document.execCommand('insertText', false, prompt);
+        await new Promise(r => setTimeout(r, 300));
+        const currentText = composer.textContent || '';
+        if (currentText.trim().length < Math.min(prompt.length * 0.5, 20)) {
+          composer.focus();
+          document.execCommand('selectAll', false, null);
+          document.execCommand('delete', false, null);
+          await new Promise(r => setTimeout(r, 100));
+          const dt = new DataTransfer();
+          dt.setData('text/plain', prompt);
+          composer.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+          await new Promise(r => setTimeout(r, 300));
+        }
       }
       await new Promise(r => setTimeout(r, 200));
       const sendBtn = document.querySelector('button[data-testid="send-button"]');
       if (sendBtn && !sendBtn.disabled) sendBtn.click();
-      else composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      else {
+        await new Promise(r => setTimeout(r, 500));
+        const retryBtn = document.querySelector('button[data-testid="send-button"]');
+        if (retryBtn && !retryBtn.disabled) retryBtn.click();
+        else composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+      }
     })()
   `);
 

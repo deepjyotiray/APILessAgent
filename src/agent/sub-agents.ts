@@ -1,5 +1,4 @@
 import type { PlannerAdapter, PlannerSession } from "./types.js";
-import { PoolPlanner } from "./pool-planner.js";
 import type { AgentEventCallback } from "./orchestrator.js";
 
 /**
@@ -26,93 +25,48 @@ export interface Plan {
 
 // --- System prompts for each role ---
 
-const PLANNER_PROMPT = `You are a task planner. Given a coding task and a file tree, break it into ordered subtasks.
+const PLANNER_PROMPT = `You are a task planner. Break the task into subtasks. Be minimal.
 
-Output format (plain text, one subtask per line):
-SUBTASK: [explore|edit|write|review|run] | files: file1.ts, file2.ts | description of what to do
+Output ONLY subtask lines, nothing else:
+SUBTASK: [explore|edit|write|review|run] | files: file1.ts, file2.ts | description
 
 Rules:
-- Start with explore if you need to understand the code first
-- Use edit for modifying existing files (produces PATCH blocks)
-- Use write for creating new files (produces CREATE blocks)
-- Use review ONLY after edits/writes to check for issues. Do NOT use review for analysis-only tasks.
-- Use run for commands (tests, build, lint)
-- Keep it to 2-5 subtasks. Don't over-plan.
-- For simple tasks (single file edit), just output one edit subtask.
-- For analysis/explanation tasks, use only explore subtasks. No review needed.
-- For the LAST explore subtask, ask for a comprehensive summary that combines all findings.
+- 1-3 subtasks max. Do NOT over-plan.
+- For analysis tasks: 1 explore subtask is enough.
+- For simple edits: 1 edit subtask.
+- Use review ONLY after edits, never for analysis.
+- Files marked ★ are pre-fetched. The pipeline auto-includes relevant files.
+- Output ONLY the SUBTASK lines. No explanation, no preamble.`;
 
-Example for "analyse the repo":
-SUBTASK: explore | files: README.md, package.json, AGENT.md | understand purpose, setup, and high-level architecture
-SUBTASK: explore | files: src/agent/orchestrator.ts, src/agent/tools.ts, src/agent/types.ts | trace core agent workflow and tool system
-SUBTASK: explore | files: app/main.cjs, src/api-server.ts, src/bridge-server.ts | inspect platform surfaces and integration points
+const EXPLORER_PROMPT = `Answer about the codebase. HARD LIMIT: 150 words max. Bullet points only. No intro, no summary, no filler. Start with the answer. If you need more files, end with NEED_FILE: path/to/file.ts`;
 
-Example for "add error handling to the API":
-SUBTASK: explore | files: src/api-server.ts | understand current error handling
-SUBTASK: edit | files: src/api-server.ts | add try-catch and error responses
-SUBTASK: run | files: | npm run build
-SUBTASK: review | files: | check the diff for issues`;
+const EDITOR_PROMPT = `Produce ONLY patch blocks. No explanation before or after.
 
-const EXPLORER_PROMPT = `You are a code explorer. Analyze the provided files and produce a detailed summary.
-
-Output a thorough analysis covering:
-- What the code does (clear explanation)
-- Key functions/classes and their purpose
-- How components connect to each other
-- Relevant patterns, conventions, or design decisions
-- Data flow and control flow
-- Dependencies and external integrations
-- Anything notable, unusual, or important
-
-Be thorough but organized. Use markdown headers and bullet points.`;
-
-const EDITOR_PROMPT = `You are a code editor. Given file contents and a task, produce surgical edits.
-
-Use this EXACT format for each edit:
-
+Format:
 PATCH: path/to/file.ext
 <<<<<<< BEFORE
-exact lines to replace (copy from the file)
+exact lines from file
 =======
-new replacement lines
+replacement lines
 >>>>>>> AFTER
 
-Rules:
-- Copy the BEFORE text EXACTLY from the file (including whitespace)
-- Keep patches small — only the lines that change plus 1-2 lines of context
-- You can output multiple PATCH blocks for different files
-- Do NOT output entire files. Only the changed sections.
-- If creating a new file, use CREATE: path\\ncontent\\nEND_CREATE`;
+For new files: CREATE: path\ncontent\nEND_CREATE
 
-const WRITER_PROMPT = `You are a technical writer. Given project context, produce documentation.
+Rules: copy BEFORE exactly, minimal context lines, no full files.`;
 
-For new files, use:
-CREATE: path/to/file.md
-content here
-END_CREATE
+const WRITER_PROMPT = `Produce ONLY file content blocks. No commentary.
 
-For updating existing files, use:
-PATCH: path/to/file.md
-<<<<<<< BEFORE
-exact text to replace
-=======
-new text
->>>>>>> AFTER
+New files: CREATE: path/to/file.md\ncontent\nEND_CREATE
+Edits: PATCH: path\n<<<<<<< BEFORE\nold\n=======\nnew\n>>>>>>> AFTER
 
-Rules:
-- Be concise and practical
-- Use markdown formatting
-- Include code examples where helpful
-- Keep patches focused — don't rewrite entire files`;
+Be concise. No filler.`;
 
-const REVIEWER_PROMPT = `You are a code reviewer. Given a git diff and optionally test output, review the changes.
+const REVIEWER_PROMPT = `Review the diff. Output ONLY:
+- PASS or FAIL on first line
+- If FAIL: max 3 bullet points listing issues + PATCH fix blocks
+- If PASS: one sentence why
 
-Output:
-- PASS or FAIL
-- If FAIL: list specific issues and suggest fixes using PATCH blocks
-- If PASS: brief summary of what looks good
-
-Be concise. Focus on bugs, logic errors, and missing edge cases.`;
+No preamble. No summary paragraph.`;
 
 export class SubAgentRunner {
   // Persistent session per role — each role reuses its own ChatGPT chat
@@ -208,9 +162,19 @@ export class SubAgentRunner {
 
   /**
    * Call a sub-agent by role. Reuses the same ChatGPT chat per role.
-   * First call for a role opens a new chat. Subsequent calls continue in it.
+   * Prompt size is capped per role to avoid sending unnecessary context.
    */
   private async callRole(role: string, prompt: string): Promise<string | null> {
+    // Role-based prompt caps: explore needs more, edit/review need less
+    const promptCaps: Record<string, number> = {
+      planner: 8000,
+      explorer: 15000,
+      editor: 20000,
+      writer: 15000,
+      reviewer: 10000,
+    };
+    const cap = promptCaps[role] ?? 25000;
+
     try {
       let session = this.sessions.get(role);
       if (!session) {
@@ -221,7 +185,7 @@ export class SubAgentRunner {
         console.log(`[${role}] Reusing existing chat`);
       }
 
-      const result = await this.chatgpt.sendTurn(session, prompt.slice(0, 35000));
+      const result = await this.chatgpt.sendTurn(session, prompt.slice(0, cap));
       if (result.ok && result.raw) {
         console.log(`[${role}] Response (${result.raw.length} chars):`, result.raw.slice(0, 100));
         return result.raw;
@@ -231,7 +195,7 @@ export class SubAgentRunner {
       console.log(`[${role}] Failed, retrying with fresh session:`, result.message);
       session = await this.chatgpt.startSession();
       this.sessions.set(role, session);
-      const retry = await this.chatgpt.sendTurn(session, prompt.slice(0, 35000));
+      const retry = await this.chatgpt.sendTurn(session, prompt.slice(0, cap));
       if (retry.ok && retry.raw) {
         console.log(`[${role}] Retry succeeded (${retry.raw.length} chars)`);
         return retry.raw;

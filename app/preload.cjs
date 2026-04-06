@@ -13,11 +13,21 @@ contextBridge.exposeInMainWorld("agent", {
   chatViewForward: () => ipcRenderer.invoke("chatview-forward"),
   chatViewRefresh: () => ipcRenderer.invoke("chatview-refresh"),
   chatViewHome: () => ipcRenderer.invoke("chatview-home"),
+  toggleMerlinView: () => ipcRenderer.invoke("toggle-merlinview"),
+  getMerlinViewVisible: () => ipcRenderer.invoke("get-merlinview-visible"),
+  merlinViewBack: () => ipcRenderer.invoke("merlinview-back"),
+  merlinViewForward: () => ipcRenderer.invoke("merlinview-forward"),
+  merlinViewRefresh: () => ipcRenderer.invoke("merlinview-refresh"),
+  merlinViewHome: () => ipcRenderer.invoke("merlinview-home"),
+  merlinInspectDom: () => ipcRenderer.invoke("merlinview-inspect-dom"),
   bridgeStatus: () => ipcRenderer.invoke("bridge:status"),
+  merlinBridgeStatus: () => ipcRenderer.invoke("bridge:merlin:status"),
   importChromeSession: () => ipcRenderer.invoke("import-chrome-cookies"),
   loginChatGPT: () => ipcRenderer.invoke("login-chatgpt"),
+  loginMerlin: () => ipcRenderer.invoke("login-merlin"),
   onAction: (cb) => ipcRenderer.on("action", (_, action) => cb(action)),
   onNavigate: (cb) => ipcRenderer.on("navigate", (_, page) => cb(page)),
   onWorkspaceChanged: (cb) => ipcRenderer.on("workspace-changed", (_, path) => cb(path)),
-  onChatViewToggled: (cb) => ipcRenderer.on("chatview-toggled", (_, visible) => cb(visible))
+  onChatViewToggled: (cb) => ipcRenderer.on("chatview-toggled", (_, visible) => cb(visible)),
+  onMerlinViewToggled: (cb) => ipcRenderer.on("merlinview-toggled", (_, visible) => cb(visible))
 });

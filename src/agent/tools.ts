@@ -11,6 +11,7 @@ import type {
   ToolResult
 } from "./types.js";
 import { MemoryStore } from "./memory.js";
+import { validateCommand as validateBashCommand, classifyCommand } from "./bash-validation.js";
 
 const execAsync = promisify(exec);
 const OUTPUT_LIMIT = Number(process.env.AGENT_OUTPUT_LIMIT ?? "12000");
@@ -172,6 +173,18 @@ function createToolDefinitions(): ToolDefinition[] {
       }
     },
     {
+      name: "delete_file",
+      description: "Delete a file from the workspace.",
+      execute: async (args, context) => {
+        if (context.safetyMode === "read_only") {
+          return err("blocked_by_mode", "delete_file is blocked in read_only mode.");
+        }
+        const target = resolveWorkspacePath(context.root, asString(args.path));
+        await fs.unlink(target);
+        return ok("Deleted file.", { path: relativeToRoot(context.root, target) });
+      }
+    },
+    {
       name: "replace_text",
       description: "Replace text in a file.",
       execute: async (args, context) => {
@@ -257,7 +270,10 @@ function createToolDefinitions(): ToolDefinition[] {
         const touchedPaths: string[] = [];
         for (const filePatch of parsed) {
           if (filePatch.newPath === "/dev/null") {
-            return err("delete_blocked", "File deletion via apply_patch is blocked in this version.");
+            const target = resolveWorkspacePath(context.root, stripDiffPath(filePatch.oldPath));
+            try { await fs.unlink(target); } catch {}
+            touchedPaths.push(relativeToRoot(context.root, target) + " (deleted)");
+            continue;
           }
           if (filePatch.oldPath !== "/dev/null" && filePatch.newPath !== filePatch.oldPath) {
             return err("rename_blocked", "File rename via apply_patch is blocked in this version.");
@@ -299,9 +315,12 @@ function createToolDefinitions(): ToolDefinition[] {
         if (!command) {
           return err("invalid_args", "run_command requires args.command.");
         }
-        const validation = validateCommand(command, context.safetyMode);
-        if (validation) {
-          return err(validation.errorCode, validation.message);
+        const validation = validateBashCommand(command, context.safetyMode, context.root);
+        if (validation.kind === "block") {
+          return err("blocked_command", validation.reason);
+        }
+        if (validation.kind === "warn") {
+          return err("command_warning", validation.message);
         }
         return ok("Command executed.", {
           command,
@@ -533,7 +552,7 @@ async function runProjectCommand(kind: "test" | "build" | "lint" | "format_check
     return err("not_configured", `${kind} command is not configured in package.json.`);
   }
 
-  if (validateCommand(command, context.safetyMode)) {
+  if (legacyValidateCommand(command, context.safetyMode)) {
     return err("blocked_by_mode", `${kind} command is blocked in the current safety mode.`);
   }
 
@@ -685,50 +704,12 @@ function stripDiffPath(value: string): string {
   return value.replace(/^[ab]\//, "");
 }
 
-function validateCommand(command: string, safetyMode: ToolExecutionContext["safetyMode"]): { errorCode: string; message: string } | null {
-  const blockedPatterns = [
-    /\brm\s+-rf\b/i,
-    /\bsudo\b/i,
-    /\bgit\s+reset\s+--hard\b/i,
-    /\bgit\s+checkout\s+--\b/i,
-    /\bshutdown\b/i,
-    /\breboot\b/i
-  ];
-
-  if (blockedPatterns.some((pattern) => pattern.test(command))) {
-    return {
-      errorCode: "blocked_command",
-      message: `Blocked command: ${command}`
-    };
-  }
-
-  if (safetyMode === "read_only") {
-    const readOnlyAllowed = /^(pwd|ls|find|rg|cat|sed|git status|git diff|git show|npm run build|npm test|npm run test)/;
-    if (!readOnlyAllowed.test(command)) {
-      return {
-        errorCode: "blocked_by_mode",
-        message: `Command blocked in read_only mode: ${command}`
-      };
-    }
-  }
-
-  if (safetyMode === "guarded") {
-    const guardedAllowed = /^(pwd|ls|find|rg|cat|sed|git status|git diff|git show|npm run build|npm run lint|npm test|npm run test)/;
-    if (!guardedAllowed.test(command)) {
-      return {
-        errorCode: "blocked_by_mode",
-        message: `Command blocked in guarded mode: ${command}`
-      };
-    }
-  }
-
-  if (/(\|\||;\s*|\n)/.test(command)) {
-    return {
-      errorCode: "interactive_or_multi_command",
-      message: "Multiple chained commands are not allowed in run_command."
-    };
-  }
-
+// validateCommand is now in bash-validation.ts
+// validateCommand also re-exported for backward compat with runProjectCommand
+function legacyValidateCommand(command: string, safetyMode: ToolExecutionContext["safetyMode"]): { errorCode: string; message: string } | null {
+  const result = validateBashCommand(command, safetyMode, "");
+  if (result.kind === "block") return { errorCode: "blocked_command", message: result.reason };
+  if (result.kind === "warn") return { errorCode: "command_warning", message: result.message };
   return null;
 }
 

@@ -14,6 +14,7 @@
   const chatMessages = $("#chatMessages");
   const chatInput = $("#chatInput");
   const sendBtn = $("#sendBtn");
+  const stopBtn = $("#stopBtn");
   const chatTitle = $("#chatTitle");
   const convList = $("#convList");
   const taskListSidebar = $("#taskListSidebar");
@@ -27,24 +28,87 @@
   const projectCtxPreview = $("#projectCtxPreview");
   const projectPicker = $("#projectPicker");
 
-  // ChatGPT panel toggle
-  const chatViewToggle = $("#chatViewToggle");
+  // --- Active model state ---
+  const MODELS = ["chatgpt", "merlin", "ollama"];
+  let activeModel = "chatgpt";
+  const modelViewToggle = $("#modelViewToggle");
   const chatViewControls = $("#chatViewControls");
-  chatViewToggle.addEventListener("click", async () => {
-    const visible = await window.agent.toggleChatView();
-    chatViewToggle.textContent = visible ? "👁 Hide ChatGPT" : "👁 Show ChatGPT";
-    chatViewControls.classList.toggle("hidden", !visible);
+  const merlinViewControls = $("#merlinViewControls");
+
+  const MODEL_VIEW_CFG = {
+    chatgpt: { icon: "👁", label: "ChatGPT", toggle: () => window.agent.toggleChatView(), controls: chatViewControls, loginId: "#loginBtn" },
+    merlin:  { icon: "🔮", label: "Merlin",  toggle: () => window.agent.toggleMerlinView(), controls: merlinViewControls, loginId: "#loginMerlinBtn" },
+    ollama:  { icon: "🦙", label: "Ollama",  toggle: null, controls: null, loginId: null },
+  };
+
+  function refreshModelUI() {
+    const cfg = MODEL_VIEW_CFG[activeModel];
+    // Badge text
+    if (activeModel === "ollama") {
+      backendBadge.textContent = `🦙 Ollama (${ollamaModelInput.value.trim() || "7b"})`;
+    } else if (activeModel === "merlin") {
+      backendBadge.textContent = "🔮 Merlin (Embedded)";
+    } else {
+      backendBadge.textContent = "ChatGPT (Embedded)";
+    }
+    // Show/hide view toggle
+    if (cfg.toggle) {
+      modelViewToggle.classList.remove("hidden");
+      modelViewToggle.textContent = `${cfg.icon} Show ${cfg.label}`;
+    } else {
+      modelViewToggle.classList.add("hidden");
+    }
+    // Hide all controls
+    chatViewControls.classList.add("hidden");
+    merlinViewControls.classList.add("hidden");
+    // Show/hide login buttons for active model only
+    $("#loginBtn").classList.toggle("hidden", activeModel !== "chatgpt");
+    $("#loginMerlinBtn").classList.toggle("hidden", activeModel !== "merlin");
+  }
+
+  // Cycle model on badge click
+  backendBadge.addEventListener("click", async () => {
+    const next = MODELS[(MODELS.indexOf(activeModel) + 1) % MODELS.length];
+    const res = await api("POST", "/planner", {
+      planner: next,
+      model: next === "ollama" ? ollamaModelInput.value.trim() : undefined
+    });
+    if (res.ok) {
+      activeModel = res.active || next;
+      syncPlannerUI(activeModel, ollamaModelInput.value.trim());
+    }
   });
+
+  // View toggle click
+  modelViewToggle.addEventListener("click", async () => {
+    const cfg = MODEL_VIEW_CFG[activeModel];
+    if (!cfg?.toggle) return;
+    const visible = await cfg.toggle();
+    modelViewToggle.textContent = visible ? `${cfg.icon} Hide ${cfg.label}` : `${cfg.icon} Show ${cfg.label}`;
+    if (cfg.controls) cfg.controls.classList.toggle("hidden", !visible);
+  });
+
   window.agent.onChatViewToggled((visible) => {
-    chatViewToggle.textContent = visible ? "👁 Hide ChatGPT" : "👁 Show ChatGPT";
+    if (activeModel !== "chatgpt") return;
+    modelViewToggle.textContent = visible ? "👁 Hide ChatGPT" : "👁 Show ChatGPT";
     chatViewControls.classList.toggle("hidden", !visible);
   });
+  window.agent.onMerlinViewToggled((visible) => {
+    if (activeModel !== "merlin") return;
+    modelViewToggle.textContent = visible ? "🔮 Hide Merlin" : "🔮 Show Merlin";
+    merlinViewControls.classList.toggle("hidden", !visible);
+  });
+
   $("#cvBack").addEventListener("click", () => window.agent.chatViewBack());
   $("#cvForward").addEventListener("click", () => window.agent.chatViewForward());
   $("#cvRefresh").addEventListener("click", () => window.agent.chatViewRefresh());
   $("#cvHome").addEventListener("click", () => window.agent.chatViewHome());
+  $("#mvBack").addEventListener("click", () => window.agent.merlinViewBack());
+  $("#mvForward").addEventListener("click", () => window.agent.merlinViewForward());
+  $("#mvRefresh").addEventListener("click", () => window.agent.merlinViewRefresh());
+  $("#mvHome").addEventListener("click", () => window.agent.merlinViewHome());
 
-  // Login button — opens a full browser window, user logs in manually, closes when done
+  // Login buttons
   $("#loginBtn").addEventListener("click", async () => {
     $("#loginBtn").textContent = "🔑 Login window open…";
     const result = await window.agent.loginChatGPT();
@@ -57,20 +121,14 @@
     checkHealth();
   });
 
-  // Import cookies from Chrome
-  $("#importCookiesBtn").addEventListener("click", async () => {
-    $("#importCookiesBtn").textContent = "🍪 Importing…";
-    const result = await window.agent.importChromeSession();
+  $("#loginMerlinBtn").addEventListener("click", async () => {
+    $("#loginMerlinBtn").textContent = "🔮 Login window open…";
+    const result = await window.agent.loginMerlin();
     if (result.ok) {
-      $("#importCookiesBtn").textContent = "✅ Imported";
-      $("#importCookiesBtn").style.color = "var(--success)";
+      $("#loginMerlinBtn").textContent = "✅ Merlin Ready";
+      $("#loginMerlinBtn").style.color = "var(--success)";
     } else {
-      $("#importCookiesBtn").textContent = "❌ " + (result.error || "Failed").slice(0, 40);
-      $("#importCookiesBtn").style.color = "var(--danger)";
-      setTimeout(() => {
-        $("#importCookiesBtn").textContent = "🍪 Import Chrome Session";
-        $("#importCookiesBtn").style.color = "";
-      }, 5000);
+      $("#loginMerlinBtn").textContent = "🔮 Login to Merlin";
     }
     checkHealth();
   });
@@ -173,15 +231,19 @@
         try {
           const data = JSON.parse(e.data);
           addEvent(data);
-          if (data.type === "backend:switched") {
-            backendBadge.textContent = data.backend === "ollama" ? `Ollama: ${data.planner?.replace("ollama:", "") ?? ""}` : data.backend === "electron" ? "ChatGPT (Embedded)" : "ChatGPT Web Bridge";
-          }
           if (data.type === "agent:step" && data.data?.step) addMessage("system", data.data.step);
           if (data.type === "agent:tool_call" && data.data?.tool) {
             addMessage("tool", `🔧 Running \`${data.data.tool}\`${data.data.reason ? ` — ${data.data.reason}` : ""}`);
           }
           if (data.type === "agent:init" && data.data) {
             addMessage("system", `⚙️ ${typeof data.data === "string" ? data.data : ""}`);
+          }
+          if (data.type === "ollama:log" && data.message) {
+            addOllamaLog(data.message, data.message.includes("failed") || data.message.includes("error"));
+          }
+          if (data.type === "planner:switched") {
+            syncPlannerUI(data.planner, data.model);
+            addMessage("system", `🔄 Planner switched to ${data.planner}${data.model ? ` (${data.model})` : ""}`);
           }
         } catch {}
       };
@@ -190,21 +252,28 @@
     checkHealth();
   }
 
+
   async function checkHealth() {
     try {
       const res = await fetch(`${API}/health`);
       if (res.ok) {
         const data = await res.json();
         const plannerOk = data.plannerStatus?.ok;
-        updateStatus(true, plannerOk);
-        // Update login button
-        const loginBtn = $("#loginBtn");
-        if (plannerOk) {
-          loginBtn.textContent = "✅ ChatGPT Ready";
-          loginBtn.style.color = "var(--success)";
-        } else {
-          loginBtn.textContent = "🔑 Login to ChatGPT";
-          loginBtn.style.color = "var(--warning)";
+        const active = data.activePlanner || "chatgpt";
+        activeModel = active;
+        updateStatus(true, plannerOk, active);
+        refreshModelUI();
+        // Update login button state for active model
+        const loginId = MODEL_VIEW_CFG[active]?.loginId;
+        if (loginId) {
+          const btn = $(loginId);
+          if (plannerOk) {
+            btn.textContent = `✅ ${MODEL_VIEW_CFG[active].label} Ready`;
+            btn.style.color = "var(--success)";
+          } else {
+            btn.textContent = `${MODEL_VIEW_CFG[active].icon} Login to ${MODEL_VIEW_CFG[active].label}`;
+            btn.style.color = "var(--warning)";
+          }
         }
       } else {
         updateStatus(false);
@@ -214,13 +283,14 @@
     }
   }
 
-  function updateStatus(apiOk, plannerOk) {
+  function updateStatus(apiOk, plannerOk, active) {
+    const name = MODEL_VIEW_CFG[active]?.label || active || "Planner";
     if (apiOk && plannerOk) {
       statusDot.className = "status-dot connected";
-      statusText.textContent = "Ready";
+      statusText.textContent = `${name} Ready`;
     } else if (apiOk) {
       statusDot.className = "status-dot connected";
-      statusText.textContent = "API up · ChatGPT not ready";
+      statusText.textContent = `API up · ${name} not ready`;
     } else {
       statusDot.className = "status-dot disconnected";
       statusText.textContent = "Disconnected";
@@ -257,6 +327,7 @@
 
   // --- Chat ---
   sendBtn.addEventListener("click", sendMessage);
+  stopBtn.addEventListener("click", abortExecution);
   chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
@@ -266,7 +337,8 @@
     const text = chatInput.value.trim();
     if (!text) return;
     chatInput.value = "";
-    sendBtn.disabled = true;
+    sendBtn.classList.add("hidden");
+    stopBtn.classList.remove("hidden");
 
     if (!currentConvId) {
       const res = await api("POST", "/conversations", { title: text.slice(0, 60) });
@@ -281,23 +353,92 @@
     const res = await api("POST", `/conversations/${currentConvId}/send`, { message: text });
     if (res.ok && res.response) {
       addMessage("assistant", res.response);
+    } else if (res.error?.includes("not found")) {
+      // Stale conversation — create a new one and retry
+      currentConvId = null;
+      const createRes = await api("POST", "/conversations", { title: text.slice(0, 60) });
+      if (createRes.ok) {
+        currentConvId = createRes.conversation.id;
+        chatTitle.textContent = createRes.conversation.title;
+        loadConversations().catch(() => {});
+        const retry = await api("POST", `/conversations/${currentConvId}/send`, { message: text });
+        if (retry.ok && retry.response) addMessage("assistant", retry.response);
+        else addMessage("system", `Error: ${retry.error ?? "Unknown error"}`);
+      } else {
+        addMessage("system", `Error: ${createRes.error ?? "Could not create conversation"}`);
+      }
     } else {
       addMessage("system", `Error: ${res.error ?? "Unknown error"}`);
     }
-    sendBtn.disabled = false;
+    stopBtn.classList.add("hidden");
+    sendBtn.classList.remove("hidden");
     chatInput.focus();
+  }
+
+  async function abortExecution() {
+    if (!currentConvId) return;
+    stopBtn.disabled = true;
+    stopBtn.textContent = "Stopping…";
+    await api("POST", `/conversations/${currentConvId}/abort`);
+    stopBtn.disabled = false;
+    stopBtn.textContent = "■ Stop";
   }
 
   function addMessage(role, content) {
     const div = document.createElement("div");
-    div.className = `message ${role}`;
+    const displayRole = role === "task" ? "system" : role;
+    div.className = `message ${displayRole}`;
     const escaped = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const formatted = escaped
-      .replace(/```diff\n([\s\S]*?)```/g, '<pre class="diff-block"><code>$1</code></pre>')
-      .replace(/```(\w*)\n([\s\S]*?)```/g, "<pre><code>$2</code></pre>")
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>");
-    div.innerHTML = formatted;
+      // Code blocks with language + copy button
+      .replace(/```diff\n([\s\S]*?)```/g, '<pre class="code-block diff-block"><button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);this.textContent=\'✓\';setTimeout(()=>this.textContent=\'Copy\',1500)">Copy</button><code>$1</code></pre>')
+      .replace(/```(\w+)\n([\s\S]*?)```/g, '<pre class="code-block"><div class="code-lang">$1<button class="copy-btn" onclick="navigator.clipboard.writeText(this.closest(\'pre\').querySelector(\'code\').textContent);this.textContent=\'✓\';setTimeout(()=>this.textContent=\'Copy\',1500)">Copy</button></div><code>$2</code></pre>')
+      .replace(/```\n([\s\S]*?)```/g, '<pre class="code-block"><button class="copy-btn" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);this.textContent=\'✓\';setTimeout(()=>this.textContent=\'Copy\',1500)">Copy</button><code>$1</code></pre>')
+      // Tables: header | row | separator
+      .replace(/^(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/gm, (_, hdr, _sep, body) => {
+        const th = hdr.split('|').filter(c => c.trim()).map(c => `<th>${c.trim()}</th>`).join('');
+        const rows = body.trim().split('\n').map(r => {
+          const cells = r.split('|').filter(c => c.trim()).map(c => `<td>${c.trim()}</td>`).join('');
+          return `<tr>${cells}</tr>`;
+        }).join('');
+        return `<table><thead><tr>${th}</tr></thead><tbody>${rows}</tbody></table>`;
+      })
+      // Headers
+      .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+      .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+      .replace(/^# (.+)$/gm, '<h2>$1</h2>')
+      // Bold and italic
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      // Inline code
+      .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+      // Links
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      // Ordered lists
+      .replace(/((?:^\d+\. .+$\n?)+)/gm, (block) => {
+        const items = block.trim().split('\n').map(l => `<li>${l.replace(/^\d+\.\s/, '')}</li>`).join('');
+        return `<ol>${items}</ol>`;
+      })
+      // Unordered lists
+      .replace(/((?:^[-*] .+$\n?)+)/gm, (block) => {
+        const items = block.trim().split('\n').map(l => `<li>${l.replace(/^[-*]\s/, '')}</li>`).join('');
+        return `<ul>${items}</ul>`;
+      })
+      // Horizontal rules
+      .replace(/^---$/gm, '<hr>')
+      // Details/summary
+      .replace(/&lt;details&gt;&lt;summary&gt;(.+?)&lt;\/summary&gt;/g, '<details><summary>$1</summary>')
+      .replace(/&lt;\/details&gt;/g, '</details>')
+      // Paragraphs: double newline
+      .replace(/\n\n/g, '</p><p>')
+      // Single line breaks
+      .replace(/\n/g, '<br>');
+    // Clean up <br>/<p> inside <pre> blocks
+    const cleaned = formatted
+      .replace(/<pre([^>]*)>(.*?)<\/pre>/gs, (m) => m.replace(/<br>/g, '\n').replace(/<\/p><p>/g, '\n\n'));
+    div.innerHTML = `<p>${cleaned}</p>`;
+    // Remove empty <p> tags
+    div.querySelectorAll('p').forEach(p => { if (!p.innerHTML.trim()) p.remove(); });
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
   }
@@ -311,8 +452,19 @@
     for (const c of res.conversations) {
       const div = document.createElement("div");
       div.className = `item-entry${c.id === currentConvId ? " active" : ""}`;
-      div.innerHTML = `<div>${c.title}</div><div class="item-meta">${c.messageCount} msgs</div>`;
-      div.addEventListener("click", () => openConversation(c.id));
+      div.innerHTML = `<div class="item-entry-content"><div>${c.title}</div><div class="item-meta">${c.messageCount} msgs</div></div><button class="item-delete-btn" title="Delete chat">🗑</button>`;
+      div.querySelector(".item-entry-content").addEventListener("click", () => openConversation(c.id));
+      div.querySelector(".item-delete-btn").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm("Delete this chat?")) return;
+        await api("DELETE", `/conversations/${c.id}`);
+        if (currentConvId === c.id) {
+          currentConvId = null; currentConv = null;
+          chatTitle.textContent = "New Conversation";
+          chatMessages.innerHTML = "";
+        }
+        loadConversations();
+      });
       convList.appendChild(div);
     }
   }
@@ -332,6 +484,18 @@
     $("#panel-chat").classList.add("active");
   }
 
+  $("#clearAllChatsBtn").addEventListener("click", async () => {
+    if (!workspaceReady) return;
+    if (!confirm("Delete ALL chats for this project? This cannot be undone.")) return;
+    const res = await api("DELETE", "/conversations");
+    if (res.ok) {
+      currentConvId = null; currentConv = null;
+      chatTitle.textContent = "New Conversation";
+      chatMessages.innerHTML = "";
+      loadConversations();
+    }
+  });
+
   $("#newConvBtn").addEventListener("click", () => {
     currentConvId = null; currentConv = null;
     chatTitle.textContent = "New Conversation";
@@ -342,41 +506,58 @@
   // --- Tasks ---
   async function loadTasks() {
     if (!workspaceReady) return;
-    const res = await api("GET", "/tasks");
-    if (!res.ok) return;
     const detail = $("#taskDetail");
     taskListSidebar.innerHTML = "";
-    if (!res.tasks.length) { detail.innerHTML = '<p class="empty-state">No tasks yet.</p>'; return; }
+    // Pull tasks from conversations
+    const res = await api("GET", "/conversations");
+    if (!res.ok) return;
+    const tasks = [];
+    for (const c of res.conversations) {
+      const full = await api("GET", `/conversations/${c.id}`);
+      if (!full.ok) continue;
+      const taskMsgs = (full.conversation.messages || []).filter(m => m.role === "task");
+      if (!taskMsgs.length) continue;
+      const started = taskMsgs.find(m => m.taskStatus === "started");
+      const finished = taskMsgs.find(m => m.taskStatus === "completed" || m.taskStatus === "failed");
+      tasks.push({
+        convId: c.id,
+        taskId: started?.taskId ?? c.id,
+        goal: started?.content ?? c.title,
+        status: finished?.taskStatus ?? "running",
+        summary: finished?.content ?? "",
+        steps: taskMsgs.length,
+        updatedAt: c.updatedAt,
+      });
+    }
+    if (!tasks.length) { detail.innerHTML = '<p class="empty-state">No tasks yet. Send a message to start one.</p>'; return; }
     detail.innerHTML = "";
-    for (const t of res.tasks) {
+    for (const t of tasks) {
       const sideDiv = document.createElement("div");
       sideDiv.className = "item-entry";
-      sideDiv.innerHTML = `<div>${t.goal?.slice(0, 40) ?? t.id.slice(0, 8)}</div><div class="item-meta">${t.status}</div>`;
-      sideDiv.addEventListener("click", () => loadTaskDetail(t.id));
+      sideDiv.innerHTML = `<div>${t.goal?.slice(0, 40)}</div><div class="item-meta">${t.status}</div>`;
+      sideDiv.addEventListener("click", () => openConversation(t.convId));
       taskListSidebar.appendChild(sideDiv);
       const card = document.createElement("div");
       card.className = "task-card";
-      card.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h3>${t.goal?.slice(0, 80) ?? "Untitled"}</h3><span class="status-badge ${t.status}">${t.status}</span></div><div class="meta">${t.id.slice(0,8)} · ${new Date(t.updatedAt).toLocaleString()}</div>`;
+      card.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h3>${t.goal?.slice(0, 80)}</h3><span class="status-badge ${t.status}">${t.status}</span></div><div class="meta">${t.steps} steps · ${new Date(t.updatedAt).toLocaleString()}${t.summary ? ` · ${t.summary}` : ""}</div>`;
       card.style.cursor = "pointer";
-      card.addEventListener("click", () => loadTaskDetail(t.id));
+      card.addEventListener("click", () => openConversation(t.convId));
       detail.appendChild(card);
     }
   }
-
-  async function loadTaskDetail(id) {
-    const res = await api("GET", `/tasks/${id}`);
-    if (!res.ok) return;
-    const t = res.task;
-    $("#taskDetail").innerHTML = `<div class="task-card"><h3>${t.goal}</h3><span class="status-badge ${t.status}">${t.status}</span><div class="meta">Steps: ${t.steps.length} · Changed: ${t.changedFiles.join(", ") || "(none)"}</div>${t.lastError ? `<div style="color:var(--danger);margin-top:8px">${t.lastError}</div>` : ""}</div>`;
-  }
-
-  window.abortTask = async (id) => { await api("POST", `/tasks/${id}/abort`); loadTasks(); };
   $("#newTaskBtn").addEventListener("click", () => {
     showModal("New Task", '<input id="taskGoal" placeholder="Describe the task…">', async () => {
       const goal = $("#taskGoal").value.trim();
       if (!goal) return;
-      await api("POST", "/tasks", { goal, safetyMode: $("#safetyMode").value });
-      hideModal(); loadTasks();
+      hideModal();
+      // Switch to chat panel
+      $$(".nav-btn").forEach((b) => b.classList.remove("active"));
+      $('[data-panel="chat"]').classList.add("active");
+      $$(".panel").forEach((p) => p.classList.remove("active"));
+      $("#panel-chat").classList.add("active");
+      // Send as a chat message
+      chatInput.value = goal;
+      sendMessage();
     });
   });
 
@@ -412,26 +593,85 @@
     if (!workspaceReady) return;
     const res = await api("GET", "/health");
     healthOutput.textContent = JSON.stringify(res, null, 2);
-    backendBadge.textContent = res.backend === "ollama" ? `Ollama: ${res.planner?.replace("ollama:", "") ?? ""}` : res.backend === "electron" ? "ChatGPT (Embedded)" : "ChatGPT Web Bridge";
+    // Sync planner toggle with server state
+    const plannerRes = await api("GET", "/planner");
+    if (plannerRes.ok) {
+      syncPlannerUI(plannerRes.active, plannerRes.ollamaModel);
+    }
     const ctxRes = await api("GET", "/project-context");
     projectCtxPreview.textContent = ctxRes.content || "(No AGENT.md found.)";
   }
 
-  $("#setElectron").addEventListener("click", async () => { await api("POST", "/backend", { backend: "electron" }); loadHealth(); });
-  $("#setChatGPT").addEventListener("click", async () => { await api("POST", "/backend", { backend: "chatgpt_web" }); loadHealth(); });
-  $("#setOllama").addEventListener("click", async () => {
-    await api("POST", "/backend", { backend: "ollama", model: $("#ollamaModel").value.trim() || "qwen2.5-coder:7b" });
-    loadHealth();
-  });
-  $("#initProjectCtx").addEventListener("click", async () => { await api("POST", "/project-context/init"); loadHealth(); });
+  // --- Planner toggle ---
+  const plannerBtns = $$(".toggle-btn[data-planner]");
+  const ollamaModelGroup = $("#ollamaModelGroup");
+  const ollamaModelInput = $("#ollamaModelInput");
+  const ollamaStatusEl = $("#ollamaStatus");
+  const ollamaLogs = $("#ollamaLogs");
 
-  backendBadge.addEventListener("click", async () => {
-    const res = await api("GET", "/health");
-    const order = ["electron", "ollama", "chatgpt_web"];
-    const next = order[(order.indexOf(res.backend) + 1) % order.length];
-    await api("POST", "/backend", { backend: next, model: $("#ollamaModel")?.value?.trim() || "qwen2.5-coder:7b" });
-    loadHealth();
+  function syncPlannerUI(active, model) {
+    activeModel = active;
+    plannerBtns.forEach(b => b.classList.toggle("active", b.dataset.planner === active));
+    ollamaModelGroup.classList.toggle("hidden", active !== "ollama");
+    if (model) ollamaModelInput.value = model;
+    refreshModelUI();
+  }
+
+  plannerBtns.forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const target = btn.dataset.planner;
+      ollamaStatusEl.textContent = "Switching…";
+      ollamaStatusEl.className = "ollama-status";
+      const res = await api("POST", "/planner", {
+        planner: target,
+        model: target === "ollama" ? ollamaModelInput.value.trim() : undefined
+      });
+      if (res.ok) {
+        syncPlannerUI(res.active, ollamaModelInput.value.trim());
+        ollamaStatusEl.textContent = res.plannerStatus?.ok ? `✅ ${res.plannerStatus.message}` : `❌ ${res.plannerStatus?.message ?? "Not ready"}`;
+        ollamaStatusEl.className = `ollama-status ${res.plannerStatus?.ok ? "ok" : "error"}`;
+        addOllamaLog(`Switched to ${res.active}`);
+      } else {
+        ollamaStatusEl.textContent = `❌ ${res.error ?? "Switch failed"}`;
+        ollamaStatusEl.className = "ollama-status error";
+      }
+    });
   });
+
+  $("#ollamaModelApply").addEventListener("click", async () => {
+    const model = ollamaModelInput.value.trim();
+    if (!model) return;
+    ollamaStatusEl.textContent = "Checking model…";
+    ollamaStatusEl.className = "ollama-status";
+    const res = await api("POST", "/planner", { planner: "ollama", model });
+    if (res.ok) {
+      syncPlannerUI("ollama", model);
+      ollamaStatusEl.textContent = res.plannerStatus?.ok ? `✅ ${res.plannerStatus.message}` : `❌ ${res.plannerStatus?.message}`;
+      ollamaStatusEl.className = `ollama-status ${res.plannerStatus?.ok ? "ok" : "error"}`;
+      addOllamaLog(`Model set to ${model}`);
+    } else {
+      ollamaStatusEl.textContent = `❌ ${res.error}`;
+      ollamaStatusEl.className = "ollama-status error";
+    }
+  });
+
+  function addOllamaLog(msg, isError) {
+    const div = document.createElement("div");
+    div.className = `log-entry${isError ? " error" : ""}`;
+    const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
+    div.innerHTML = `<span class="log-ts">${ts}</span><span class="log-msg">${msg.replace(/</g, "&lt;")}</span>`;
+    ollamaLogs.appendChild(div);
+    if (ollamaLogs.children.length > 500) ollamaLogs.removeChild(ollamaLogs.firstChild);
+    ollamaLogs.scrollTop = ollamaLogs.scrollHeight;
+  }
+
+  $("#merlinInspectBtn").addEventListener("click", async () => {
+    $("#merlinDomOutput").textContent = "Inspecting…";
+    const result = await window.agent.merlinInspectDom();
+    $("#merlinDomOutput").textContent = JSON.stringify(result, null, 2);
+  });
+
+  $("#initProjectCtx").addEventListener("click", async () => { await api("POST", "/project-context/init"); loadHealth(); });
 
   // --- Modal ---
   function showModal(title, bodyHtml, onConfirm) {
