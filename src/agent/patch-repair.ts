@@ -4,7 +4,7 @@
  */
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const REPAIR_MODEL = process.env.REPAIR_MODEL ?? "qwen2.5-coder:32b";
+const REPAIR_MODEL = process.env.REPAIR_MODEL ?? "qwen2.5-coder:7b";
 const REPAIR_TIMEOUT_MS = 15_000;
 
 const REPAIR_PROMPT = `You are a patch formatter. Convert the input into EXACT patch format.

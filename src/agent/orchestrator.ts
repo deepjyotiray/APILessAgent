@@ -8,7 +8,7 @@ import type { ContextResult } from "./context-pipeline.js";
 import type { SubTask } from "./sub-agents.js";
 import { needsKnowledgeBase, buildKnowledgeBase, enrichFromChatGPT, loadKnowledgeBase } from "./knowledge-base.js";
 import type { Conversation, ConversationStore } from "./conversation.js";
-import { extractNeedFiles, normalizePlannerResponse } from "./chat-llm.js";
+import { extractNeedFiles, needFileToToolCall, normalizePlannerResponse } from "./chat-llm.js";
 
 export interface AgentEvent {
   type: "init" | "thinking" | "tool_call" | "tool_result" | "answer" | "error" | "step";
@@ -198,32 +198,30 @@ export class ChatGPTAgent {
       // Try to parse as JSON tool call
       let parsed = this.parseToolCall(raw);
 
-      // If not JSON, try normalizer
+      // Fast path: check for NEED_FILE pattern (no LLM needed)
       if (!parsed) {
-        const normalized = await normalizePlannerResponse(raw);
+        const needFiles = extractNeedFiles(raw);
+        if (needFiles && needFiles.length > 0) {
+          parsed = needFileToToolCall(needFiles[0]) as any;
+          thinking.push(`${this.ts()} Step ${step + 1}: NEED_FILE → ${needFiles[0]}`);
+        }
+      }
+
+      // If not JSON, try normalizer with context so it can detect generic answers
+      if (!parsed) {
+        const fileHints = contextResult.files.map(f => f.path);
+        const normalized = await normalizePlannerResponse(raw, userMessage, fileHints);
         if (normalized.ok && normalized.json) {
           parsed = normalized.json as any;
           thinking.push(`${this.ts()} Step ${step + 1}: normalizer extracted: ${(parsed as any).type}`);
         }
       }
 
-      // If still not JSON, check if it's a prose answer (no JSON at all = the LLM just answered)
+      // If still not JSON, treat as prose answer
       if (!parsed) {
-        // If the response has no JSON-like content, treat it as a direct answer
-        if (!raw.includes('"type"')) {
-          output.push(raw.trim());
-          thinking.push(`${this.ts()} Step ${step + 1}: prose answer (${raw.length} chars)`);
-          break;
-        }
-        // Otherwise ask for retry
-        thinking.push(`${this.ts()} Step ${step + 1}: invalid JSON, asking retry`);
-        const retry = await this.chatgpt.sendTurn(session,
-          "Your last reply was not valid JSON. Respond with ONLY a raw JSON object. " +
-          'If you want to answer the user, use: {"type":"done","message":"your answer"}. ' +
-          'If you need to run a command: {"type":"tool","tool":"run_command","args":{"command":"..."},"reason":"why"}'
-        );
-        raw = this.unescape(retry.raw ?? retry.message ?? "");
-        continue;
+        output.push(raw.trim());
+        thinking.push(`${this.ts()} Step ${step + 1}: prose answer (${raw.length} chars)`);
+        break;
       }
 
       // Handle "done" — the LLM's final answer
@@ -319,12 +317,21 @@ export class ChatGPTAgent {
   }
 
   private unescape(text: string): string {
-    let t = text
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&amp;/g, "&")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
+    let t = text;
+    // Loop to handle double/triple-encoded entities (e.g. &amp;quot; → &quot; → ")
+    let prev = '';
+    while (prev !== t) {
+      prev = t;
+      // Decode &amp; LAST to avoid turning &amp;quot; into &quot; then missing it
+      t = t
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&#x27;/g, "'")
+        .replace(/&#x2F;/g, "/")
+        .replace(/&amp;/g, "&");
+    }
     // Strip outer wrapping quotes that some bridges add: "{ ... }" → { ... }
     const trimmed = t.trim();
     if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
@@ -362,6 +369,20 @@ export class ChatGPTAgent {
 
   // --- Helpers ---
 
+  /** Known tool names — if the planner puts one of these as "type", normalize to {type:"tool",tool:name} */
+  private static TOOL_NAMES = new Set([
+    "read_file", "read_file_range", "write_file", "delete_file", "replace_text",
+    "insert_text", "apply_patch", "search", "run_command", "run_tests", "run_build", "git_diff",
+  ]);
+
+  private normalizeToolType(obj: Record<string, unknown>): Record<string, unknown> {
+    if (obj.type === "tool" || obj.type === "done") return obj;
+    if (typeof obj.type === "string" && ChatGPTAgent.TOOL_NAMES.has(obj.type)) {
+      return { ...obj, tool: obj.type, type: "tool" };
+    }
+    return obj;
+  }
+
   private parseToolCall(raw: string): { type: string; tool?: string; args?: Record<string, unknown>; reason?: string; message?: string } | null {
     const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const start = trimmed.indexOf("{");
@@ -378,9 +399,16 @@ export class ChatGPTAgent {
         depth--;
         if (depth === 0) {
           const candidate = trimmed.slice(start, i + 1);
-          try { const obj = JSON.parse(candidate); if (obj.type) return obj; } catch {}
+          try { const obj = JSON.parse(candidate); if (obj.type) return this.normalizeToolType(obj) as any; } catch {}
           const sanitized = this.sanitizeJsonNewlines(candidate);
-          try { const obj = JSON.parse(sanitized); if (obj.type) return obj; } catch {}
+          try { const obj = JSON.parse(sanitized); if (obj.type) return this.normalizeToolType(obj) as any; } catch {}
+          // Try unescaping residual HTML entities inside the JSON
+          const unescaped = this.unescape(candidate);
+          if (unescaped !== candidate) {
+            try { const obj = JSON.parse(unescaped); if (obj.type) return this.normalizeToolType(obj) as any; } catch {}
+            const sanitized2 = this.sanitizeJsonNewlines(unescaped);
+            try { const obj = JSON.parse(sanitized2); if (obj.type) return this.normalizeToolType(obj) as any; } catch {}
+          }
           // Last resort: extract type+message via regex for "done" responses
           const extracted = this.extractDoneFromBroken(candidate);
           if (extracted) return extracted;

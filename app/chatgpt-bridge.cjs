@@ -213,7 +213,11 @@ async function waitForResponse(countBefore, timeoutMs) {
             }
             // If structured extraction got content, use it; otherwise fall back to textContent
             const extracted = parts.join('\\n').trim();
-            return extracted || (lastMsg.textContent || '').trim();
+            const raw = extracted || (lastMsg.textContent || '').trim();
+            // Decode any residual HTML entities (e.g. &quot; inside code blocks)
+            const ta = document.createElement('textarea');
+            ta.innerHTML = raw;
+            return ta.value;
           }
         }
       }

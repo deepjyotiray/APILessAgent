@@ -8,10 +8,12 @@
  */
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const NORMALIZE_MODEL = process.env.CLASSIFY_MODEL ?? "qwen2.5-coder:32b";
+const NORMALIZE_MODEL = process.env.CLASSIFY_MODEL ?? "qwen2.5-coder:7b";
 const TIMEOUT_MS = 15_000;
 
 const NORMALIZE_PROMPT = `You are a JSON translator. Convert the assistant's natural-language response into exactly one JSON tool call.
+
+IMPORTANT: The "type" field must ALWAYS be either "tool" or "done". The tool name goes in the "tool" field.
 
 Available tool call formats:
 {"type":"tool","tool":"read_file","args":{"path":"<file>"},"reason":"<why>"}
@@ -27,6 +29,7 @@ Rules:
 - If the response describes an edit → replace_text or write_file
 - If the response says it's finished or summarises changes → done
 - If the response asks to run a command → run_command
+- NEVER use a tool name as the "type" value. Always use "type":"tool" with the tool name in "tool".
 - Output ONLY the JSON object. No markdown, no explanation.
 
 Assistant's response:
@@ -43,17 +46,30 @@ export interface NormalizeResult {
  * Attempt to normalize a planner's natural-language response into a JSON tool call
  * using a local Ollama model.
  */
-export async function normalizePlannerResponse(plannerResponse: string): Promise<NormalizeResult> {
+export async function normalizePlannerResponse(
+  plannerResponse: string,
+  userMessage?: string,
+  availableFiles?: string[]
+): Promise<NormalizeResult> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    let prompt = NORMALIZE_PROMPT + plannerResponse;
+    if (userMessage) {
+      prompt += `\n\nUser's original question: ${userMessage.slice(0, 500)}`;
+    }
+    if (availableFiles?.length) {
+      prompt += `\n\nFiles in the project that could be read: ${availableFiles.slice(0, 20).join(", ")}`;
+      prompt += `\n\nIMPORTANT: If the assistant gave a generic answer without actually reading the relevant files, emit a read_file tool call for the most relevant file instead of "done".`;
+    }
 
     const res = await fetch(`${OLLAMA_URL}/api/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: NORMALIZE_MODEL,
-        prompt: NORMALIZE_PROMPT + plannerResponse,
+        prompt,
         stream: false,
         format: "json",
         options: { temperature: 0, num_predict: 1024 },

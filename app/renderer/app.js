@@ -707,4 +707,21 @@
     if ($("#panel-tasks").classList.contains("active")) loadTasks().catch(() => {});
     checkHealth();
   }, 5000);
+  // Theme switcher
+  if (window.themeManager) {
+    const switcher = document.createElement('div');
+    switcher.className = 'theme-switcher';
+    window.themeManager.getAvailableThemes().forEach(theme => {
+      const btn = document.createElement('button');
+      btn.className = `theme-button ${theme.id === window.themeManager.getCurrentTheme() ? 'active' : ''}`;
+      btn.textContent = theme.name;
+      btn.onclick = () => {
+        window.themeManager.applyTheme(theme.id);
+        switcher.querySelectorAll('.theme-button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      };
+      switcher.appendChild(btn);
+    });
+    document.body.appendChild(switcher);
+  }
 })();

@@ -17,7 +17,7 @@ import { parseChatGPTDiff } from "./diff-parser.js";
 import { fuzzyReplace } from "./fuzzy-match.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const EDITOR_MODEL = process.env.EDITOR_MODEL ?? "qwen2.5-coder:32b";
+const EDITOR_MODEL = process.env.EDITOR_MODEL ?? "qwen2.5-coder:7b";
 const EDIT_TIMEOUT_MS = 60_000; // 60s for large files
 
 export interface EditRequest {
